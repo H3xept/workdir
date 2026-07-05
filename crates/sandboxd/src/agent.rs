@@ -24,6 +24,7 @@ use tokio::process::Command;
 
 const MAX_LOG_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 4 * 1024 * 1024;
+const AGENT_WORKDIR: &str = "/workspace";
 
 struct HardnessProfile {
     create: Value,
@@ -131,13 +132,24 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
     let node = state.node_for(sb.node_id.as_deref().unwrap_or(""));
     let api_secret_value = decrypt_secret(&state, &run.org_id, &run.api_key_secret)?;
 
-    node.write_file(
-        &handle,
-        ".workdir-agent-prompt.txt",
-        agent_prompt(&run).as_bytes(),
-    )
-    .await
-    .context("write agent prompt")?;
+    let prompt_write = node
+        .exec(
+            &handle,
+            &ExecRequest {
+                cmd: format!(
+                    "printf '%s' {} > .workdir-agent-prompt.txt",
+                    shell_quote(&agent_prompt(&run))
+                ),
+                cwd: Some(AGENT_WORKDIR.into()),
+                env: BTreeMap::new(),
+                background: false,
+            },
+        )
+        .await
+        .context("write agent prompt")?;
+    if prompt_write.exit_code != 0 {
+        bail!("write agent prompt failed: {}", prompt_write.stderr);
+    }
 
     let profile = hardness_profile(run.hardness);
     let iterations = effective_iterations(&run, profile.loop_iterations);
@@ -153,7 +165,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
                 &handle,
                 &ExecRequest {
                     cmd,
-                    cwd: None,
+                    cwd: Some(AGENT_WORKDIR.into()),
                     env,
                     background: false,
                 },
@@ -189,7 +201,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
             &handle,
             &ExecRequest {
                 cmd: "rm -f .workdir-agent-prompt.txt .workdir-agent-final.txt; rm -rf .workdir-codex-home".to_string(),
-                cwd: None,
+                cwd: Some(AGENT_WORKDIR.into()),
                 env: BTreeMap::new(),
                 background: false,
             },
@@ -205,7 +217,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
             &handle,
             &ExecRequest {
                 cmd: "git add -A && git diff --cached --binary".to_string(),
-                cwd: None,
+                cwd: Some(AGENT_WORKDIR.into()),
                 env: BTreeMap::new(),
                 background: false,
             },

@@ -346,7 +346,7 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
                 &handle,
                 &ExecRequest {
                     cmd,
-                    cwd: None,
+                    cwd: Some("/workspace".into()),
                     env: BTreeMap::new(),
                     background: false,
                 },
@@ -370,7 +370,7 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
                 &handle,
                 &ExecRequest {
                     cmd: cmd.run.clone(),
-                    cwd: None,
+                    cwd: Some("/workspace".into()),
                     env: recipe.env.clone(),
                     background: cmd.background,
                 },
