@@ -222,9 +222,9 @@ POST /v1/templates/node-app/sandboxes
 { "count": 3, "overrides": { "auto_stop_seconds": 600 } }
 ```
 
-Agent runs build on templates. Workdir creates a sandbox, injects only the model
-provider key by secret name, runs Codex or Claude Code, collects the staged git
-diff, and can open a GitHub PR from the control plane:
+Agent runs build on templates. Workdir creates a sandbox, passes the model
+provider key only to the agent process, runs Codex or Claude Code, collects the
+staged git diff, and can open a GitHub PR from the control plane:
 
 ```jsonc
 POST /v1/agent-runs
@@ -239,6 +239,10 @@ POST /v1/agent-runs
   "github": { "token_secret": "GITHUB_TOKEN", "draft": true }
 }
 ```
+
+`api_key_secret` is a Workdir secret name. For the agent process, Workdir maps
+that secret's value to the provider-specific CLI environment variable
+(`CODEX_API_KEY` for Codex, `ANTHROPIC_API_KEY` for Claude Code).
 
 `hardness` chooses default resources and timeout when no template is provided
 (`easy`, `medium`, `hard`). Template values and explicit request fields win over

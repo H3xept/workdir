@@ -761,6 +761,10 @@ async fn agent_run_uses_template_collects_diff_and_redacts_secret() {
     assert!(logs["stdout"].as_str().unwrap().contains("[redacted]"));
     assert!(!logs["stdout"].as_str().unwrap().contains(secret_value));
     assert!(logs["diff"].as_str().unwrap().contains("agent.txt"));
+    assert!(!logs["diff"]
+        .as_str()
+        .unwrap()
+        .contains(".workdir-agent-prompt.txt"));
 }
 
 #[tokio::test]

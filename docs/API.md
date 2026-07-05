@@ -90,6 +90,10 @@ If `github.token_secret` is omitted, the run stops after collecting the diff.
 When present, the token is used only by the control plane to create the branch,
 commit, push, and PR; it is not injected into the sandbox.
 
+`api_key_secret` names the stored provider key. Workdir maps that value to the
+selected CLI's required environment variable (`CODEX_API_KEY` for Codex,
+`ANTHROPIC_API_KEY` for Claude Code) when it starts the agent.
+
 ### Lifecycle & perpetual standby
 
 States: `creating → running → stopping → {stopped|standby} → resuming → running`,

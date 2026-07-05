@@ -200,6 +200,11 @@ const run = await wd.agentRuns.create({
 console.log(run.status_url);
 ```
 
+`api_key_secret` is the Workdir secret name containing the provider key. Workdir
+maps it to the CLI-specific environment variable for the selected agent
+(`CODEX_API_KEY` for Codex, `ANTHROPIC_API_KEY` for Claude Code). The GitHub
+token is used only by the control plane to create the branch and PR.
+
 #### Network egress policy
 
 ```ts

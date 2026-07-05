@@ -129,7 +129,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
         .clone()
         .ok_or_else(|| anyhow!("created sandbox has no runtime handle"))?;
     let node = state.node_for(sb.node_id.as_deref().unwrap_or(""));
-    let api_secret_value = decrypt_secret(&state, &run.org_id, &run.api_key_secret).ok();
+    let api_secret_value = decrypt_secret(&state, &run.org_id, &run.api_key_secret)?;
 
     node.write_file(
         &handle,
@@ -146,6 +146,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
     let mut stderr = String::new();
     for _ in 0..iterations {
         let cmd = agent_command(&run);
+        let env = agent_env(run.agent, &api_secret_value);
         let exec = tokio::time::timeout(
             Duration::from_secs(profile.timeout_seconds),
             node.exec(
@@ -153,7 +154,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
                 &ExecRequest {
                     cmd,
                     cwd: None,
-                    env: BTreeMap::new(),
+                    env,
                     background: false,
                 },
             ),
@@ -169,8 +170,8 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
         }
     }
 
-    let stdout = redact_secret(stdout, api_secret_value.as_deref());
-    let stderr = redact_secret(stderr, api_secret_value.as_deref());
+    let stdout = redact_secret(stdout, Some(&api_secret_value));
+    let stderr = redact_secret(stderr, Some(&api_secret_value));
     let (stdout, stdout_truncated) = truncate(stdout, MAX_LOG_BYTES);
     let (stderr, stderr_truncated) = truncate(stderr, MAX_LOG_BYTES);
     run.stdout = stdout;
@@ -181,6 +182,22 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
 
     if last_exit != 0 {
         bail!("agent exited with code {last_exit}");
+    }
+
+    let cleanup = node
+        .exec(
+            &handle,
+            &ExecRequest {
+                cmd: "rm -f .workdir-agent-prompt.txt .workdir-agent-final.txt; rm -rf .workdir-codex-home".to_string(),
+                cwd: None,
+                env: BTreeMap::new(),
+                background: false,
+            },
+        )
+        .await
+        .context("clean agent internal files")?;
+    if cleanup.exit_code != 0 {
+        bail!("clean agent internal files failed: {}", cleanup.stderr);
     }
 
     let diff = node
@@ -201,7 +218,7 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
     if diff.stdout.trim().is_empty() {
         bail!("agent produced no git diff");
     }
-    let diff_stdout = redact_secret(diff.stdout, api_secret_value.as_deref());
+    let diff_stdout = redact_secret(diff.stdout, Some(&api_secret_value));
     let (stored_diff, diff_truncated) = truncate(diff_stdout, MAX_DIFF_BYTES);
     run.diff = stored_diff.clone();
     run.logs_truncated = run.logs_truncated || diff_truncated;
@@ -239,7 +256,6 @@ fn build_create_value(state: &AppState, run: &AgentRun) -> ApiResult<Value> {
     };
     let mut create = merge_create(base, None)?;
     set_repo_git(&mut create, run);
-    add_startup_secret(&mut create, &run.api_key_secret);
     Ok(create)
 }
 
@@ -253,18 +269,6 @@ fn set_repo_git(create: &mut Value, run: &AgentRun) {
         git["ref"] = Value::String(r.clone());
     }
     startup.insert("git".into(), git);
-}
-
-fn add_startup_secret(create: &mut Value, name: &str) {
-    let startup = startup_object(create);
-    let entry = startup.entry("secrets").or_insert_with(|| json!([]));
-    if !entry.is_array() {
-        *entry = json!([]);
-    }
-    let arr = entry.as_array_mut().expect("secrets is array");
-    if !arr.iter().any(|v| v.as_str() == Some(name)) {
-        arr.push(Value::String(name.to_string()));
-    }
 }
 
 fn startup_object(create: &mut Value) -> &mut Map<String, Value> {
@@ -332,22 +336,43 @@ fn agent_prompt(run: &AgentRun) -> String {
     prompt
 }
 
+fn agent_env(agent: AgentKind, api_key: &str) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    match agent {
+        AgentKind::Codex => {
+            env.insert("CODEX_API_KEY".into(), api_key.to_string());
+            // Older docs and Workdir examples used OPENAI_API_KEY. Keep it
+            // available for compatibility with existing templates and tests.
+            env.insert("OPENAI_API_KEY".into(), api_key.to_string());
+        }
+        AgentKind::ClaudeCode => {
+            env.insert("ANTHROPIC_API_KEY".into(), api_key.to_string());
+        }
+    }
+    env
+}
+
 fn agent_command(run: &AgentRun) -> String {
     let model = shell_quote(&run.model);
     match run.agent {
-        AgentKind::Codex => format!(
+        AgentKind::Codex => {
+            let codex_home = shell_quote(&format!("/tmp/workdir-codex-home-{}", run.id));
+            format!(
             "set -e; export PATH=\"$PWD:$PATH\"; \
+             export CODEX_HOME={codex_home}; mkdir -p \"$CODEX_HOME\"; \
              if ! command -v codex >/dev/null 2>&1; then npm install -g @openai/codex; fi; \
-             codex exec --model {model} --sandbox danger-full-access --ask-for-approval never \
-               --cd \"$PWD\" --skip-git-repo-check --output-last-message .workdir-agent-final.txt - \
+             codex exec --model {model} --ignore-user-config \
+               --dangerously-bypass-approvals-and-sandbox \
+               --cd \"$PWD\" --skip-git-repo-check --output-last-message /tmp/workdir-agent-final.txt - \
                < .workdir-agent-prompt.txt"
-        ),
+            )
+        }
         AgentKind::ClaudeCode => format!(
             "set -e; export PATH=\"$PWD:$PATH\"; \
              if ! command -v claude >/dev/null 2>&1; then npm install -g @anthropic-ai/claude-code; fi; \
              claude --print --model {model} --permission-mode bypassPermissions \
                --dangerously-skip-permissions < .workdir-agent-prompt.txt \
-               | tee .workdir-agent-final.txt"
+               | tee /tmp/workdir-agent-final.txt"
         ),
     }
 }
