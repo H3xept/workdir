@@ -34,8 +34,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use std::time::SystemTime;
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -1072,6 +1072,38 @@ impl FirecrackerRuntime {
                 rec.resident_env.extend(spec.secret_env.clone());
                 rec.has_secrets = !spec.secret_env.is_empty();
             }
+        }
+
+        // Fresh microVMs can inherit the image build timestamp rather than the
+        // host's current wall clock. Sync early so TLS-based startup work (npm,
+        // curl, package managers, agent installers) does not fail with
+        // CERT_NOT_YET_VALID.
+        let host_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let clock = self
+            .agent_call(
+                handle,
+                &json!({
+                    "op": "exec",
+                    "cmd": format!("date -u -s @{host_epoch} >/dev/null 2>&1"),
+                    "background": false,
+                }),
+            )
+            .await
+            .context("sync guest clock")?;
+        let clock_exit = clock
+            .get("exit_code")
+            .and_then(|c| c.as_i64())
+            .unwrap_or(-1);
+        if clock_exit != 0 {
+            tracing::warn!(
+                handle = %handle,
+                exit_code = clock_exit,
+                stderr = clock.get("stderr").and_then(|s| s.as_str()).unwrap_or(""),
+                "failed to sync guest clock"
+            );
         }
 
         if spec.network.uses_domain_rules() {
