@@ -43,8 +43,18 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-__version__ = "0.1.2"
-__all__ = ["Client", "ExecJob", "ExecLogs", "ExecResult", "Sandbox", "SandboxError"]
+__version__ = "0.2.0"
+__all__ = [
+    "AgentRun",
+    "AgentRunLogs",
+    "Client",
+    "ExecJob",
+    "ExecLogs",
+    "ExecResult",
+    "Sandbox",
+    "SandboxError",
+    "SandboxTemplate",
+]
 
 
 class SandboxError(Exception):
@@ -81,6 +91,53 @@ class ExecLogs:
     state: str
     stdout: str
     stderr: str
+    truncated: bool
+
+
+@dataclass
+class SandboxTemplate:
+    id: str
+    name: str
+    create: dict
+    created_at: str
+    updated_at: str
+    description: Optional[str] = None
+
+
+@dataclass
+class AgentRun:
+    id: str
+    state: str
+    repo: dict
+    prompt: str
+    model: str
+    agent: str
+    api_key_secret: str
+    hardness: str
+    created_at: str
+    updated_at: str
+    sandbox_id: Optional[str] = None
+    template: Optional[str] = None
+    loop: Optional[dict] = None
+    github: Optional[dict] = None
+    verification_result: Optional[str] = None
+    branch: Optional[str] = None
+    commit: Optional[str] = None
+    pr_url: Optional[str] = None
+    error: Optional[str] = None
+    logs_truncated: bool = False
+    finished_at: Optional[str] = None
+    status_url: Optional[str] = None
+    logs_url: Optional[str] = None
+
+
+@dataclass
+class AgentRunLogs:
+    id: str
+    state: str
+    stdout: str
+    stderr: str
+    diff: str
     truncated: bool
 
 
@@ -279,6 +336,117 @@ class _Images:
         return self._http.request("DELETE", f"/v1/images/{image_id}")
 
 
+class _Templates:
+    def __init__(self, http: _Http):
+        self._http = http
+
+    def create(self, name: str, create: Optional[dict] = None,
+               description: Optional[str] = None) -> SandboxTemplate:
+        r = self._http.request("POST", "/v1/templates", {
+            "name": name,
+            "description": description,
+            "create": create or {},
+        })
+        return _template(r)
+
+    def get(self, name: str) -> SandboxTemplate:
+        q = urllib.parse.quote(name, safe="")
+        return _template(self._http.request("GET", f"/v1/templates/{q}"))
+
+    def list(self) -> list[SandboxTemplate]:
+        data = self._http.request("GET", "/v1/templates")
+        return [_template(t) for t in data.get("templates", [])]
+
+    def update(self, name: str, create: Optional[dict] = None,
+               description: Optional[str] = None) -> SandboxTemplate:
+        q = urllib.parse.quote(name, safe="")
+        r = self._http.request("PUT", f"/v1/templates/{q}", {
+            "description": description,
+            "create": create or {},
+        })
+        return _template(r)
+
+    def delete(self, name: str) -> dict:
+        q = urllib.parse.quote(name, safe="")
+        return self._http.request("DELETE", f"/v1/templates/{q}")
+
+    def spawn(self, name: str, count: Optional[int] = None,
+              overrides: Optional[dict] = None) -> list[Sandbox]:
+        q = urllib.parse.quote(name, safe="")
+        body = {}
+        if count is not None:
+            body["count"] = count
+        if overrides is not None:
+            body["overrides"] = overrides
+        data = self._http.request("POST", f"/v1/templates/{q}/sandboxes", body)
+        return [Sandbox(self._http, s) for s in data.get("sandboxes", [])]
+
+
+class _AgentRuns:
+    def __init__(self, http: _Http):
+        self._http = http
+
+    def create(self, **request) -> AgentRun:
+        return _agent_run(self._http.request("POST", "/v1/agent-runs", request))
+
+    def get(self, run_id: str) -> AgentRun:
+        return _agent_run(self._http.request("GET", f"/v1/agent-runs/{run_id}"))
+
+    def list(self) -> list[AgentRun]:
+        data = self._http.request("GET", "/v1/agent-runs")
+        return [_agent_run(r) for r in data.get("agent_runs", [])]
+
+    def logs(self, run_id: str) -> AgentRunLogs:
+        r = self._http.request("GET", f"/v1/agent-runs/{run_id}/logs")
+        return AgentRunLogs(
+            id=r["id"],
+            state=r["state"],
+            stdout=r["stdout"],
+            stderr=r["stderr"],
+            diff=r["diff"],
+            truncated=bool(r.get("truncated", False)),
+        )
+
+
+def _template(r: dict) -> SandboxTemplate:
+    return SandboxTemplate(
+        id=r["id"],
+        name=r["name"],
+        description=r.get("description"),
+        create=r.get("create", {}),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+    )
+
+
+def _agent_run(r: dict) -> AgentRun:
+    return AgentRun(
+        id=r["id"],
+        state=r["state"],
+        sandbox_id=r.get("sandbox_id"),
+        template=r.get("template"),
+        repo=r["repo"],
+        prompt=r["prompt"],
+        model=r["model"],
+        agent=r["agent"],
+        api_key_secret=r["api_key_secret"],
+        hardness=r["hardness"],
+        loop=r.get("loop"),
+        github=r.get("github"),
+        verification_result=r.get("verification_result"),
+        branch=r.get("branch"),
+        commit=r.get("commit"),
+        pr_url=r.get("pr_url"),
+        error=r.get("error"),
+        logs_truncated=bool(r.get("logs_truncated", False)),
+        created_at=r["created_at"],
+        updated_at=r["updated_at"],
+        finished_at=r.get("finished_at"),
+        status_url=r.get("status_url"),
+        logs_url=r.get("logs_url"),
+    )
+
+
 class _Volumes:
     def __init__(self, http: _Http):
         self._http = http
@@ -331,6 +499,8 @@ class Client:
         self._http = _Http(base_url, api_key, timeout)
         self.sandboxes = _Sandboxes(self._http)
         self.images = _Images(self._http)
+        self.templates = _Templates(self._http)
+        self.agent_runs = _AgentRuns(self._http)
         self.volumes = _Volumes(self._http)
         self.nodes = _Nodes(self._http)
         self.secrets = _Secrets(self._http)

@@ -29,6 +29,67 @@ The default create is one call with no body and yields the cheapest, fastest pat
 | `POST` | `/v1/sandboxes/:id/resume` | Resume from stopped disk/snapshot. |
 | `DELETE` | `/v1/sandboxes/:id` | Stop, delete ephemeral disk, remove routes. |
 
+## Templates
+
+Org-scoped named sandbox create configs. A template's `create` field is the same
+JSON body accepted by `POST /v1/sandboxes`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/v1/templates` | `{name, description?, create}` → store a named create config. |
+| `GET` | `/v1/templates` | List the caller's templates. |
+| `GET` | `/v1/templates/:name` | Get one template. |
+| `PUT` | `/v1/templates/:name` | Replace `description` + `create`. |
+| `DELETE` | `/v1/templates/:name` | Delete one template. |
+| `POST` | `/v1/templates/:name/sandboxes` | `{count?, overrides?}` → create 1–20 fresh sandboxes from the template. |
+
+```jsonc
+{
+  "name": "node-app",
+  "create": {
+    "image": "node-python",
+    "resources": { "cpu": 2, "memory_mb": 4096, "disk_gb": 16 },
+    "startup": {
+      "git": { "url": "https://github.com/acme/app.git", "ref": "main" },
+      "commands": [{ "name": "install", "run": "pnpm install --frozen-lockfile" }],
+      "ports": [3000]
+    }
+  }
+}
+```
+
+## Agent runs
+
+Agent runs create a sandbox from a template or hardness profile, run Codex or
+Claude Code inside it, collect a staged git diff, and optionally open a GitHub
+PR from the control plane. Provider keys and GitHub tokens are referenced by
+secret name; secret values are never returned.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/v1/agent-runs` | Start an async run → `202 {id, state, status_url, logs_url}`. |
+| `GET` | `/v1/agent-runs` | List runs. |
+| `GET` | `/v1/agent-runs/:id` | Status, sandbox id, branch/commit/PR URL, error. |
+| `GET` | `/v1/agent-runs/:id/logs` | Captured stdout/stderr and staged diff. |
+
+```jsonc
+{
+  "template": "node-app",
+  "repo": { "url": "https://github.com/acme/app.git", "ref": "main" },
+  "agent": "codex",                  // codex | claude_code
+  "model": "gpt-5",
+  "api_key_secret": "OPENAI_API_KEY",
+  "prompt": "Fix the failing tests and keep the change minimal.",
+  "hardness": "medium",              // easy | medium | hard
+  "loop": { "goal": "Open a ready PR", "max_iterations": 2 },
+  "github": { "token_secret": "GITHUB_TOKEN", "base_branch": "main", "draft": true }
+}
+```
+
+If `github.token_secret` is omitted, the run stops after collecting the diff.
+When present, the token is used only by the control plane to create the branch,
+commit, push, and PR; it is not injected into the sandbox.
+
 ### Lifecycle & perpetual standby
 
 States: `creating → running → stopping → {stopped|standby} → resuming → running`,

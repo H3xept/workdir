@@ -550,6 +550,220 @@ async fn coding_agent_is_opt_in_and_validated() {
 }
 
 #[tokio::test]
+async fn templates_crud_and_batch_spawn() {
+    let (base, key, _tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let create_body = serde_json::json!({
+        "name": "node-app",
+        "description": "test template",
+        "create": {
+            "startup": {
+                "commands": [
+                    { "name": "mark", "run": "echo templated > template.txt" }
+                ]
+            }
+        }
+    });
+    let resp = c
+        .post(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let template: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(template["name"], "node-app");
+    assert_eq!(template["create"]["startup"]["commands"][0]["name"], "mark");
+
+    let duplicate = c
+        .post(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .json(&create_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), 409);
+
+    let listed: serde_json::Value = c
+        .get(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["templates"].as_array().unwrap().len(), 1);
+
+    let spawned: serde_json::Value = c
+        .post(format!("{base}/v1/templates/node-app/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "count": 2,
+            "overrides": { "auto_stop_seconds": 300 }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let sandboxes = spawned["sandboxes"].as_array().unwrap();
+    assert_eq!(sandboxes.len(), 2);
+    for sb in sandboxes {
+        assert_eq!(sb["auto_stop_seconds"], 300);
+        let id = sb["id"].as_str().unwrap();
+        let read: serde_json::Value = c
+            .get(format!("{base}/v1/sandboxes/{id}/files?path=template.txt"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "templated\n");
+    }
+
+    let deleted: serde_json::Value = c
+        .delete(format!("{base}/v1/templates/node-app"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(deleted["deleted"], true);
+}
+
+#[tokio::test]
+async fn agent_run_uses_template_collects_diff_and_redacts_secret() {
+    let (base, key, tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let repo = tmp.path().join("fixture-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "test"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+
+    let secret_value = "sk-test-redact-me";
+    let stored: serde_json::Value = c
+        .put(format!("{base}/v1/secrets/OPENAI_API_KEY"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({ "value": secret_value }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["stored"], true);
+
+    let fake_codex =
+        "cat >/dev/null\nprintf \"secret=$OPENAI_API_KEY\\n\"\necho changed > agent.txt\n";
+    let script_cmd = format!("cat > codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x codex");
+    let resp = c
+        .post(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "name": "fake-codex",
+            "create": {
+                "startup": {
+                    "commands": [
+                        { "name": "fake-codex", "run": script_cmd }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let launched: serde_json::Value = c
+        .post(format!("{base}/v1/agent-runs"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "template": "fake-codex",
+            "repo": { "url": repo.to_string_lossy(), "ref": "main" },
+            "prompt": "make a deterministic change",
+            "model": "test-model",
+            "agent": "codex",
+            "api_key_secret": "OPENAI_API_KEY"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = launched["id"].as_str().unwrap().to_string();
+    assert_eq!(launched["state"], "queued");
+
+    let mut status = launched;
+    for _ in 0..150 {
+        if status["state"] != "queued" && status["state"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        status = c
+            .get(format!("{base}/v1/agent-runs/{run_id}"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+    }
+    assert_eq!(status["state"], "succeeded", "agent run status: {status}");
+    assert!(status["sandbox_id"].is_string());
+    assert!(status["pr_url"].is_null());
+
+    let logs: serde_json::Value = c
+        .get(format!("{base}/v1/agent-runs/{run_id}/logs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(logs["stdout"].as_str().unwrap().contains("[redacted]"));
+    assert!(!logs["stdout"].as_str().unwrap().contains(secret_value));
+    assert!(logs["diff"].as_str().unwrap().contains("agent.txt"));
+}
+
+#[tokio::test]
 async fn browser_requires_explicit_resources_and_image() {
     let (base, key, _tmp) = spawn_server().await;
     let c = client();

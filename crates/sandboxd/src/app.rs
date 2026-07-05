@@ -211,6 +211,14 @@ pub async fn build_state(cfg: Config) -> Result<crate::state::AppState> {
         ),
         Err(e) => tracing::error!(error = %e, "exec job startup reconciliation failed"),
     }
+    match store.reconcile_interrupted_agent_runs(chrono::Utc::now()) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            count = n,
+            "reconciled interrupted agent runs from a prior run"
+        ),
+        Err(e) => tracing::error!(error = %e, "agent run startup reconciliation failed"),
+    }
 
     let secret_key = crate::secrets::load_or_create_key(&cfg.server.data_dir)
         .context("load/generate secret encryption key")?;

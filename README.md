@@ -170,6 +170,36 @@ box = wd.sandboxes.create(
 box.exec("opencode run 'add a regression test'")
 ```
 
+#### Templates and agent PR runs
+
+```ts
+await wd.templates.create({
+  name: "node-app",
+  create: {
+    image: "node-python",
+    resources: { cpu: 2, memory_mb: 4096, disk_gb: 16 },
+    startup: {
+      git: { url: "https://github.com/acme/app.git", ref: "main" },
+      commands: [{ name: "install", run: "pnpm install --frozen-lockfile" }],
+    },
+  },
+});
+const boxes = await wd.templates.spawn("node-app", { count: 3 });
+
+await wd.secrets.set("OPENAI_API_KEY", process.env.OPENAI_API_KEY!);
+await wd.secrets.set("GITHUB_TOKEN", process.env.GITHUB_TOKEN!);
+const run = await wd.agentRuns.create({
+  template: "node-app",
+  repo: { url: "https://github.com/acme/app.git", ref: "main" },
+  agent: "codex",
+  model: "gpt-5",
+  api_key_secret: "OPENAI_API_KEY",
+  prompt: "Fix the failing tests and open a small PR.",
+  github: { token_secret: "GITHUB_TOKEN", draft: true },
+});
+console.log(run.status_url);
+```
+
 #### Network egress policy
 
 ```ts

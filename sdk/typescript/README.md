@@ -25,4 +25,27 @@ console.log(await box.execLogs(job.cmd_id));
 await box.delete();
 ```
 
+```ts
+await workdir.templates.create({
+  name: "node-app",
+  create: {
+    image: "node-python",
+    resources: { cpu: 2, memory_mb: 4096, disk_gb: 16 },
+    startup: { git: { url: "https://github.com/acme/app.git", ref: "main" } },
+  },
+});
+const boxes = await workdir.templates.spawn("node-app", { count: 2 });
+
+const run = await workdir.agentRuns.create({
+  template: "node-app",
+  repo: { url: "https://github.com/acme/app.git", ref: "main" },
+  agent: "codex",
+  model: "gpt-5",
+  api_key_secret: "OPENAI_API_KEY",
+  prompt: "Fix the failing tests.",
+  github: { token_secret: "GITHUB_TOKEN", draft: true },
+});
+console.log(run.status_url);
+```
+
 The SDK uses the global `fetch` API and supports Node.js 18+, Deno, Bun, and browsers.

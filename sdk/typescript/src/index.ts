@@ -109,6 +109,62 @@ export interface ExecLogs {
   truncated: boolean;
 }
 
+export interface SandboxTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  create: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentRunRequest {
+  template?: string;
+  repo: { url: string; ref?: string };
+  prompt: string;
+  model: string;
+  agent: "codex" | "claude_code";
+  api_key_secret: string;
+  hardness?: "easy" | "medium" | "hard";
+  loop?: { goal?: string; max_iterations?: number };
+  github?: { token_secret?: string; base_branch?: string; draft?: boolean };
+}
+
+export interface AgentRun {
+  id: string;
+  state: "queued" | "running" | "succeeded" | "failed" | string;
+  sandbox_id?: string | null;
+  template?: string | null;
+  repo: { url: string; ref?: string };
+  prompt: string;
+  model: string;
+  agent: string;
+  api_key_secret: string;
+  hardness: string;
+  loop?: Record<string, unknown>;
+  github?: Record<string, unknown> | null;
+  verification_result?: string | null;
+  branch?: string | null;
+  commit?: string | null;
+  pr_url?: string | null;
+  error?: string | null;
+  logs_truncated?: boolean;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+  status_url?: string;
+  logs_url?: string;
+}
+
+export interface AgentRunLogs {
+  id: string;
+  state: string;
+  stdout: string;
+  stderr: string;
+  diff: string;
+  truncated: boolean;
+}
+
 export class SandboxError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(`[${status} ${code}] ${message}`);
@@ -273,6 +329,55 @@ class Images {
   delete(id: string) { return this.http.request("DELETE", `/v1/images/${id}`); }
 }
 
+class Templates {
+  constructor(private http: Http) {}
+  create(input: { name: string; description?: string; create?: Record<string, unknown> }) {
+    return this.http.request<SandboxTemplate>("POST", "/v1/templates", {
+      name: input.name,
+      description: input.description,
+      create: input.create ?? {},
+    });
+  }
+  get(name: string) { return this.http.request<SandboxTemplate>("GET", `/v1/templates/${encodeURIComponent(name)}`); }
+  list() {
+    return this.http.request<{ templates: SandboxTemplate[] }>("GET", "/v1/templates")
+      .then((r) => r.templates);
+  }
+  update(name: string, input: { description?: string; create?: Record<string, unknown> }) {
+    return this.http.request<SandboxTemplate>("PUT", `/v1/templates/${encodeURIComponent(name)}`, {
+      description: input.description,
+      create: input.create ?? {},
+    });
+  }
+  delete(name: string) {
+    return this.http.request("DELETE", `/v1/templates/${encodeURIComponent(name)}`);
+  }
+  spawn(name: string, opts: { count?: number; overrides?: Record<string, unknown> } = {}) {
+    return this.http.request<{ sandboxes: any[] }>(
+      "POST",
+      `/v1/templates/${encodeURIComponent(name)}/sandboxes`,
+      opts,
+    ).then((r) => r.sandboxes.map((s) => new Sandbox(this.http, s)));
+  }
+}
+
+class AgentRuns {
+  constructor(private http: Http) {}
+  create(req: AgentRunRequest) {
+    return this.http.request<AgentRun>("POST", "/v1/agent-runs", req);
+  }
+  get(id: string) {
+    return this.http.request<AgentRun>("GET", `/v1/agent-runs/${id}`);
+  }
+  list() {
+    return this.http.request<{ agent_runs: AgentRun[] }>("GET", "/v1/agent-runs")
+      .then((r) => r.agent_runs);
+  }
+  logs(id: string) {
+    return this.http.request<AgentRunLogs>("GET", `/v1/agent-runs/${id}/logs`);
+  }
+}
+
 class Volumes {
   constructor(private http: Http) {}
   create(name: string, sizeGb: number) {
@@ -301,6 +406,8 @@ class Secrets {
 export class Client {
   readonly sandboxes: Sandboxes;
   readonly images: Images;
+  readonly templates: Templates;
+  readonly agentRuns: AgentRuns;
   readonly volumes: Volumes;
   readonly nodes: Nodes;
   readonly secrets: Secrets;
@@ -310,6 +417,8 @@ export class Client {
     this.http = new Http(baseUrl, apiKey);
     this.sandboxes = new Sandboxes(this.http);
     this.images = new Images(this.http);
+    this.templates = new Templates(this.http);
+    this.agentRuns = new AgentRuns(this.http);
     this.volumes = new Volumes(this.http);
     this.nodes = new Nodes(this.http);
     this.secrets = new Secrets(this.http);

@@ -40,6 +40,14 @@ pub fn volume_id() -> String {
     format!("vol_{}", rand_hex(6))
 }
 
+pub fn template_id() -> String {
+    format!("tmpl_{}", rand_hex(6))
+}
+
+pub fn agent_run_id() -> String {
+    format!("arun_{}", rand_hex(6))
+}
+
 /// ext4 label for a volume's backing image (≤16 bytes), so the guest can mount
 /// it by `LABEL=` regardless of which `/dev/vdX` Firecracker assigns it.
 /// `vol_a1b2c3d4d5e6` → `wdvb2c3d4d5e6` (drop the `vol_` prefix, prefix `wdv`).

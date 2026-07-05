@@ -5,6 +5,7 @@ use crate::knobs::{Resources, ResourcesRequest};
 use crate::lifecycle::State;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use std::net::Ipv4Addr;
 
 /// Where a sandbox came from. The response MUST report this honestly so that
@@ -621,6 +622,49 @@ pub struct VolumeAttach {
 }
 
 // ---------------------------------------------------------------------------
+// Sandbox templates
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxTemplate {
+    pub id: String,
+    pub org_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Validated `POST /v1/sandboxes` body. Stored as JSON so future create
+    /// fields can be templated without a store migration.
+    pub create: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTemplateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub create: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTemplateRequest {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub create: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpawnTemplateRequest {
+    #[serde(default)]
+    pub count: Option<u32>,
+    #[serde(default)]
+    pub overrides: Option<Value>,
+}
+
+// ---------------------------------------------------------------------------
 // Async exec jobs
 // ---------------------------------------------------------------------------
 
@@ -664,6 +708,150 @@ pub struct ExecJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent runs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunState {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl AgentRunState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentRunState::Queued => "queued",
+            AgentRunState::Running => "running",
+            AgentRunState::Succeeded => "succeeded",
+            AgentRunState::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Codex,
+    ClaudeCode,
+}
+
+impl AgentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentKind::Codex => "codex",
+            AgentKind::ClaudeCode => "claude_code",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Hardness {
+    Easy,
+    #[default]
+    Medium,
+    Hard,
+}
+
+impl Hardness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Hardness::Easy => "easy",
+            Hardness::Medium => "medium",
+            Hardness::Hard => "hard",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRepoSpec {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentLoopConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentGithubConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentRunRequest {
+    #[serde(default)]
+    pub template: Option<String>,
+    pub repo: AgentRepoSpec,
+    pub prompt: String,
+    pub model: String,
+    pub agent: AgentKind,
+    pub api_key_secret: String,
+    #[serde(default)]
+    pub hardness: Option<Hardness>,
+    #[serde(default)]
+    pub r#loop: Option<AgentLoopConfig>,
+    #[serde(default)]
+    pub github: Option<AgentGithubConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRun {
+    pub id: String,
+    pub org_id: String,
+    pub state: AgentRunState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    pub repo: AgentRepoSpec,
+    pub prompt: String,
+    pub model: String,
+    pub agent: AgentKind,
+    pub api_key_secret: String,
+    pub hardness: Hardness,
+    #[serde(default)]
+    pub r#loop: AgentLoopConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<AgentGithubConfig>,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub diff: String,
+    #[serde(default)]
+    pub logs_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
 }
