@@ -141,9 +141,9 @@ rejected with `400 bad_request`:
   "snapshot_enabled": false,
   "timings": { "boot_ms": 42, "image_cache_ms": 0, "git_ms": 0,
                "install_ms": 0, "ready_ms": 0, "total_ms": 43 },
-  "urls": { "ports": { "3000": "https://sbx_…-3000.<domain>" },
-            "vnc": "https://sbx_…-6080.<domain>",
-            "cdp": "https://sbx_…-9222.<domain>" },
+  "urls": { "ports": { "3000": "https://sbx-…-3000.<domain>" },
+            "vnc": "https://sbx-…-6080.<domain>",
+            "cdp": "https://sbx-…-9222.<domain>" },
   "mounts": [],
   "volumes": [],
   "network": { "egress": "default" },
@@ -261,10 +261,13 @@ carries the Phase 2 targets (`p50 < 25ms`, `p90 < 50ms`), surfaced under
 
 ## Preview proxy (spec §16.2)
 
-Host-routed: `https://<sandbox-id>-<port>.<domain>/…`. HTTP is forwarded;
-WebSocket/CDP/VNC upgrades are bridged. Requires a valid API key (header or
-`?key=`) belonging to the sandbox's org. A path-based form
-`/_preview/<id>/<port>/<rest>` exists for environments without wildcard DNS.
+Host-routed: `https://<hostname-safe-id>-<port>.<domain>/…` (sandbox ids render
+their `sbx_` prefix as `sbx-` in the DNS label). HTTP is forwarded;
+WebSocket/CDP/VNC upgrades are bridged. Requires a valid API key (header,
+`?key=`, or the preview cookie set by an earlier `?key=` request) belonging to
+the sandbox's org. A path-based form `/_preview/<id>/<port>/<rest>` exists for
+environments without wildcard DNS; use `/_preview/<id>/<port>` for the upstream
+root path.
 
 ### Driving the browser over CDP
 
@@ -279,6 +282,13 @@ header. An unauthenticated request returns `404` by design — existence is neve
 leaked across orgs. The `key=` param is stripped before the request reaches
 Chrome and redacted from logs, so it is safe in the URL; prefer it for WebSocket
 clients that cannot set headers on the upgrade.
+
+When a browser request authenticates with `?key=`, the proxy also returns an
+HttpOnly, Secure, SameSite preview cookie scoped to that preview host. Follow-up
+subresource requests and WebSocket upgrades can then authenticate without
+rewriting every URL. The proxy strips that preview cookie before forwarding to
+the sandbox, and it also blocks a sandbox from setting the reserved preview
+cookie name in upstream responses.
 
 ```js
 import { chromium } from "playwright";

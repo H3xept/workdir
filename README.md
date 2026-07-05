@@ -109,7 +109,9 @@ const box = await workdir.sandboxes.create({
   },
 });
 
-console.log(box.urls.ports["3000"]);   // public preview URL, served through an authenticated proxy
+// Public preview URL. The first ?key= request seeds an HttpOnly preview cookie
+// so browser subresources and WebSocket upgrades stay authenticated.
+console.log(box.urls.ports["3000"]);
 ```
 
 ### Feature examples
