@@ -81,7 +81,7 @@ secret name; secret values are never returned.
   "api_key_secret": "OPENAI_API_KEY",
   "prompt": "Fix the failing tests and keep the change minimal.",
   "hardness": "medium",              // easy | medium | hard
-  "loop": { "goal": "Open a ready PR", "max_iterations": 2 },
+  "loop": { "goal": "Fix the failing tests and leave the repo with a clean diff.", "max_iterations": 2 },
   "github": { "token_secret": "GITHUB_TOKEN", "base_branch": "main", "draft": true }
 }
 ```
@@ -93,6 +93,10 @@ commit, push, and PR; it is not injected into the sandbox.
 `api_key_secret` names the stored provider key. Workdir maps that value to the
 selected CLI's required environment variable (`CODEX_API_KEY` for Codex,
 `ANTHROPIC_API_KEY` for Claude Code) when it starts the agent.
+
+Agent prompts and loop goals should ask the agent to modify files in the cloned
+repo. The sandbox agent should not commit, push, or create the PR; Workdir does
+that headlessly from the collected diff.
 
 ### Lifecycle & perpetual standby
 

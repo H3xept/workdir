@@ -8,6 +8,7 @@ use crate::model::{
     AgentGithubConfig, AgentKind, AgentRun, AgentRunState, CreateAgentRunRequest,
     CreateSandboxRequest, Hardness,
 };
+use crate::node::NodeClient;
 use crate::runtime::ExecRequest;
 use crate::secrets;
 use crate::service;
@@ -19,6 +20,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -212,25 +214,17 @@ async fn run_agent_task(state: AppState, ctx: AuthContext, run_id: String) -> Re
         bail!("clean agent internal files failed: {}", cleanup.stderr);
     }
 
-    let diff = node
-        .exec(
-            &handle,
-            &ExecRequest {
-                cmd: "git add -A && git diff --cached --binary".to_string(),
-                cwd: Some(AGENT_WORKDIR.into()),
-                env: BTreeMap::new(),
-                background: false,
-            },
-        )
-        .await
-        .context("collect git diff")?;
-    if diff.exit_code != 0 {
-        bail!("collect git diff failed: {}", diff.stderr);
+    let mut diff_stdout = collect_staged_diff(&node, &handle).await?;
+    if diff_stdout.trim().is_empty() {
+        let output = format!("{}\n{}", run.stdout, run.stderr);
+        if apply_agent_output_patch(&node, &handle, &output).await? {
+            diff_stdout = collect_staged_diff(&node, &handle).await?;
+        }
     }
-    if diff.stdout.trim().is_empty() {
+    if diff_stdout.trim().is_empty() {
         bail!("agent produced no git diff");
     }
-    let diff_stdout = redact_secret(diff.stdout, Some(&api_secret_value));
+    let diff_stdout = redact_secret(diff_stdout, Some(&api_secret_value));
     let (stored_diff, diff_truncated) = truncate(diff_stdout, MAX_DIFF_BYTES);
     run.diff = stored_diff.clone();
     run.logs_truncated = run.logs_truncated || diff_truncated;
@@ -337,8 +331,199 @@ fn effective_iterations(run: &AgentRun, profile_default: u32) -> u32 {
     }
 }
 
+async fn collect_staged_diff(node: &Arc<dyn NodeClient>, handle: &str) -> Result<String> {
+    let diff = node
+        .exec(
+            handle,
+            &ExecRequest {
+                cmd: "git add -A && git diff --cached --binary".to_string(),
+                cwd: Some(AGENT_WORKDIR.into()),
+                env: BTreeMap::new(),
+                background: false,
+            },
+        )
+        .await
+        .context("collect git diff")?;
+    if diff.exit_code != 0 {
+        bail!("collect git diff failed: {}", diff.stderr);
+    }
+    Ok(diff.stdout)
+}
+
+async fn apply_agent_output_patch(
+    node: &Arc<dyn NodeClient>,
+    handle: &str,
+    output: &str,
+) -> Result<bool> {
+    for (idx, patch) in patch_candidates(output).into_iter().enumerate() {
+        let path = format!(".workdir-agent-output-{idx}.patch");
+        node.write_file(handle, &path, patch.as_bytes())
+            .await
+            .context("write agent output patch")?;
+        let quoted_path = shell_quote(&path);
+        let apply = node
+            .exec(
+                handle,
+                &ExecRequest {
+                    cmd: format!(
+                        "set +e; git apply --check --binary {quoted_path}; check=$?; \
+                         if [ $check -eq 0 ]; then git apply --index --binary {quoted_path}; status=$?; \
+                         else status=$check; fi; rm -f {quoted_path}; exit $status"
+                    ),
+                    cwd: Some(AGENT_WORKDIR.into()),
+                    env: BTreeMap::new(),
+                    background: false,
+                },
+            )
+            .await
+            .context("apply agent output patch")?;
+        if apply.exit_code == 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn patch_candidates(output: &str) -> Vec<String> {
+    let normalized = output.replace("\r\n", "\n");
+    let mut out = Vec::new();
+    for block in fenced_blocks(&normalized) {
+        if let Some(patch) = extract_patch_region(&block) {
+            push_unique_patch(&mut out, patch);
+        }
+    }
+    if let Some(patch) = extract_patch_region(&normalized) {
+        push_unique_patch(&mut out, patch);
+    }
+    out
+}
+
+fn fenced_blocks(output: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current = Vec::new();
+    let mut in_fence = false;
+    for line in output.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_fence {
+                let block = current.join("\n");
+                if looks_like_patch(&block) {
+                    blocks.push(block);
+                }
+                current.clear();
+                in_fence = false;
+            } else {
+                in_fence = true;
+                current.clear();
+            }
+            continue;
+        }
+        if in_fence {
+            current.push(line);
+        }
+    }
+    blocks
+}
+
+fn push_unique_patch(out: &mut Vec<String>, mut patch: String) {
+    if !patch.ends_with('\n') {
+        patch.push('\n');
+    }
+    if !out.iter().any(|existing| existing == &patch) {
+        out.push(patch);
+    }
+}
+
+fn looks_like_patch(value: &str) -> bool {
+    value.contains("diff --git ") || value.starts_with("--- ") || value.contains("\n--- ")
+}
+
+fn extract_patch_region(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.iter().enumerate().find_map(|(idx, line)| {
+        if is_git_diff_start(line) || is_bare_diff_start(&lines, idx) {
+            Some(idx)
+        } else {
+            None
+        }
+    })?;
+
+    let mut patch = Vec::new();
+    let mut in_hunk = false;
+    for line in &lines[start..] {
+        if line.trim_start().starts_with("```") {
+            break;
+        }
+        if is_git_diff_start(line) {
+            in_hunk = false;
+            patch.push(*line);
+            continue;
+        }
+        if is_patch_metadata(line) {
+            patch.push(*line);
+            continue;
+        }
+        if line.starts_with("@@") {
+            in_hunk = true;
+            patch.push(*line);
+            continue;
+        }
+        if in_hunk && is_hunk_line(line) {
+            patch.push(*line);
+            continue;
+        }
+        if patch.is_empty() {
+            continue;
+        }
+        break;
+    }
+
+    if patch.is_empty() {
+        None
+    } else {
+        Some(patch.join("\n"))
+    }
+}
+
+fn is_git_diff_start(line: &str) -> bool {
+    line.starts_with("diff --git ")
+}
+
+fn is_bare_diff_start(lines: &[&str], idx: usize) -> bool {
+    lines.get(idx).is_some_and(|line| line.starts_with("--- "))
+        && lines
+            .get(idx + 1)
+            .is_some_and(|line| line.starts_with("+++ "))
+}
+
+fn is_patch_metadata(line: &str) -> bool {
+    line.starts_with("index ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+}
+
+fn is_hunk_line(line: &str) -> bool {
+    line.starts_with('+')
+        || line.starts_with('-')
+        || line.starts_with(' ')
+        || line.starts_with("\\ No newline at end of file")
+}
+
 fn agent_prompt(run: &AgentRun) -> String {
     let mut prompt = String::new();
+    prompt.push_str(
+        "Workdir background agent instructions:\n\
+         - Modify files in the current git checkout directly.\n\
+         - Do not only describe a patch or print a diff; apply the changes to the working tree.\n\
+         - Do not commit, push, or open a pull request. Workdir will create the branch, commit, push, and pull request from your diff.\n\
+         - Do not ask follow-up questions. Make reasonable assumptions and finish the requested change.\n\n",
+    );
     if let Some(goal) = &run.r#loop.goal {
         prompt.push_str("Goal:\n");
         prompt.push_str(goal);

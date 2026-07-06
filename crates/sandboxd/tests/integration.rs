@@ -768,6 +768,140 @@ async fn agent_run_uses_template_collects_diff_and_redacts_secret() {
 }
 
 #[tokio::test]
+async fn agent_run_applies_patch_printed_by_agent() {
+    let (base, key, tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let repo = tmp.path().join("patch-output-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "test"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+
+    let stored: serde_json::Value = c
+        .put(format!("{base}/v1/secrets/OPENAI_API_KEY"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({ "value": "sk-test-patch-output" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["stored"], true);
+
+    let fake_codex = r#"cat >/dev/null
+cat >&2 <<'PATCH'
+Here is the patch I would apply:
+
+```diff
+diff --git a/agent-output.txt b/agent-output.txt
+new file mode 100644
+--- /dev/null
++++ b/agent-output.txt
+@@ -0,0 +1 @@
++from printed patch
+```
+
+tokens used
+123
+PATCH
+"#;
+    let script_cmd = format!("cat > codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x codex");
+    let resp = c
+        .post(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "name": "patch-output-codex",
+            "create": {
+                "startup": {
+                    "commands": [
+                        { "name": "fake-codex", "run": script_cmd }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let launched: serde_json::Value = c
+        .post(format!("{base}/v1/agent-runs"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "template": "patch-output-codex",
+            "repo": { "url": repo.to_string_lossy(), "ref": "main" },
+            "prompt": "make a deterministic change",
+            "model": "test-model",
+            "agent": "codex",
+            "api_key_secret": "OPENAI_API_KEY"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = launched["id"].as_str().unwrap().to_string();
+
+    let mut status = launched;
+    for _ in 0..150 {
+        if status["state"] != "queued" && status["state"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        status = c
+            .get(format!("{base}/v1/agent-runs/{run_id}"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+    }
+    assert_eq!(status["state"], "succeeded", "agent run status: {status}");
+
+    let logs: serde_json::Value = c
+        .get(format!("{base}/v1/agent-runs/{run_id}/logs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let diff = logs["diff"].as_str().unwrap();
+    assert!(diff.contains("agent-output.txt"));
+    assert!(diff.contains("from printed patch"));
+}
+
+#[tokio::test]
 async fn browser_requires_explicit_resources_and_image() {
     let (base, key, _tmp) = spawn_server().await;
     let c = client();

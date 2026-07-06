@@ -248,6 +248,8 @@ that secret's value to the provider-specific CLI environment variable
 (`easy`, `medium`, `hard`). Template values and explicit request fields win over
 the profile defaults. GitHub write tokens are not injected into the sandbox; the
 control plane uses them to create the branch, commit, push, and PR.
+Prompt the sandbox agent to edit files and leave a diff. Workdir handles the
+GitHub branch, commit, push, and PR after the agent exits.
 
 ---
 
