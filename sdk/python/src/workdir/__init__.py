@@ -44,7 +44,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = [
     "AgentRun",
     "AgentRunLogs",
@@ -110,16 +110,16 @@ class SandboxTemplate:
 class AgentRun:
     id: str
     state: str
-    repo: dict
-    prompt: str
-    model: str
-    agent: str
-    api_key_secret: str
-    hardness: str
     created_at: str
     updated_at: str
     sandbox_id: Optional[str] = None
     template: Optional[str] = None
+    repo: Optional[dict] = None
+    prompt: Optional[str] = None
+    model: Optional[str] = None
+    agent: Optional[str] = None
+    api_key_secret: Optional[str] = None
+    hardness: Optional[str] = None
     loop: Optional[dict] = None
     github: Optional[dict] = None
     task: Optional[dict] = None
@@ -504,14 +504,16 @@ def _agent_run(r: dict) -> AgentRun:
     return AgentRun(
         id=r["id"],
         state=r["state"],
+        created_at=r.get("created_at", ""),
+        updated_at=r.get("updated_at", ""),
         sandbox_id=r.get("sandbox_id"),
         template=r.get("template"),
-        repo=r["repo"],
-        prompt=r["prompt"],
-        model=r["model"],
-        agent=r["agent"],
-        api_key_secret=r["api_key_secret"],
-        hardness=r["hardness"],
+        repo=r.get("repo"),
+        prompt=r.get("prompt"),
+        model=r.get("model"),
+        agent=r.get("agent"),
+        api_key_secret=r.get("api_key_secret"),
+        hardness=r.get("hardness"),
         loop=r.get("loop"),
         github=r.get("github"),
         task=r.get("task"),
@@ -529,8 +531,6 @@ def _agent_run(r: dict) -> AgentRun:
         pr_url=r.get("pr_url"),
         error=r.get("error"),
         logs_truncated=bool(r.get("logs_truncated", False)),
-        created_at=r["created_at"],
-        updated_at=r["updated_at"],
         finished_at=r.get("finished_at"),
         status_url=r.get("status_url"),
         logs_url=r.get("logs_url"),
@@ -540,31 +540,36 @@ def _agent_run(r: dict) -> AgentRun:
 
 
 def _agent_run_report(r: dict) -> AgentRunReport:
+    diff_stats = r.get("diff_stats") or {}
+    if not diff_stats and isinstance(r.get("changed_files"), int):
+        diff_stats = {"files_changed": r.get("changed_files")}
+    changed_files = r.get("changed_files") if isinstance(r.get("changed_files"), list) else []
+    artifacts = r.get("artifacts") if isinstance(r.get("artifacts"), list) else []
     return AgentRunReport(
-        run_id=r["run_id"],
-        outcome=r["outcome"],
-        summary=r["summary"],
+        run_id=r.get("run_id", ""),
+        outcome=r.get("outcome", ""),
+        summary=r.get("summary", ""),
         task=r.get("task") or {},
-        mode=r["mode"],
-        agent=r["agent"],
-        model=r["model"],
+        mode=r.get("mode", ""),
+        agent=r.get("agent", ""),
+        model=r.get("model", ""),
         template=r.get("template"),
-        hardness=r["hardness"],
+        hardness=r.get("hardness", ""),
         sandbox_id=r.get("sandbox_id"),
         branch=r.get("branch"),
         commit=r.get("commit"),
         pr_url=r.get("pr_url"),
-        diff_stats=r.get("diff_stats") or {},
-        changed_files=r.get("changed_files") or [],
+        diff_stats=diff_stats,
+        changed_files=changed_files,
         constraints=r.get("constraints") or {},
         verification=r.get("verification") or [],
-        artifacts=r.get("artifacts") or [],
+        artifacts=artifacts,
         error=r.get("error"),
         stdout_tail=r.get("stdout_tail", ""),
         stderr_tail=r.get("stderr_tail", ""),
         logs_truncated=bool(r.get("logs_truncated", False)),
         duration_ms=r.get("duration_ms"),
-        generated_at=r["generated_at"],
+        generated_at=r.get("generated_at", ""),
     )
 
 

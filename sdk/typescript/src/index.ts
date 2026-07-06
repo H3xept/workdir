@@ -201,17 +201,25 @@ export interface AgentRunReport {
   generated_at: string;
 }
 
+export interface AgentRunCompactReport {
+  outcome?: string;
+  summary?: string;
+  changed_files?: number;
+  artifacts?: number;
+  verification?: AgentRunReport["verification"];
+}
+
 export interface AgentRun {
   id: string;
   state: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
   sandbox_id?: string | null;
   template?: string | null;
-  repo: { url: string; ref?: string };
-  prompt: string;
-  model: string;
-  agent: string;
-  api_key_secret: string;
-  hardness: string;
+  repo?: { url: string; ref?: string };
+  prompt?: string;
+  model?: string;
+  agent?: string;
+  api_key_secret?: string;
+  hardness?: string;
   loop?: Record<string, unknown>;
   github?: Record<string, unknown> | null;
   task?: AgentTask;
@@ -223,7 +231,7 @@ export interface AgentRun {
   verification_results?: AgentRunReport["verification"];
   artifacts?: AgentRunReport["artifacts"];
   constraint_result?: AgentRunReport["constraints"] | null;
-  report?: AgentRunReport | null;
+  report?: AgentRunReport | AgentRunCompactReport | null;
   branch?: string | null;
   commit?: string | null;
   pr_url?: string | null;
