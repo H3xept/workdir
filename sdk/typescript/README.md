@@ -42,10 +42,13 @@ const run = await workdir.agentRuns.create({
   agent: "codex",
   model: "gpt-5",
   api_key_secret: "OPENAI_API_KEY",
-  prompt: "Fix the failing tests.",
+  prompt: "Fix the failing tests and leave a clean diff.",
+  task: { name: "Fix failing tests", labels: ["delegated"] },
+  verify: [{ name: "tests", run: "pnpm test", fail_run: true }],
   github: { token_secret: "GITHUB_TOKEN", draft: true },
 });
-console.log(run.status_url);
+const finished = await workdir.agentRuns.wait(run.id);
+console.log((await workdir.agentRuns.report(finished.id)).summary);
 ```
 
 The SDK uses the global `fetch` API and supports Node.js 18+, Deno, Bun, and browsers.

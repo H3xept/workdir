@@ -128,11 +128,82 @@ export interface AgentRunRequest {
   hardness?: "easy" | "medium" | "hard";
   loop?: { goal?: string; max_iterations?: number };
   github?: { token_secret?: string; base_branch?: string; draft?: boolean };
+  task?: AgentTask;
+  mode?: "change" | "review";
+  constraints?: AgentConstraints;
+  context?: AgentContext;
+  verify?: AgentVerifyCommand[];
+}
+
+export interface AgentTask {
+  name?: string;
+  external_id?: string;
+  parent_run_id?: string;
+  labels?: string[];
+  priority?: number;
+}
+
+export interface AgentConstraints {
+  allowed_paths?: string[];
+  blocked_paths?: string[];
+  max_changed_files?: number;
+  max_diff_bytes?: number;
+  max_runtime_seconds?: number;
+  max_artifact_bytes?: number;
+}
+
+export interface AgentContext {
+  instructions?: string;
+  files?: { path: string; content: string }[];
+  links?: { title?: string; url: string; description?: string }[];
+}
+
+export interface AgentVerifyCommand {
+  name: string;
+  run: string;
+  timeout_seconds?: number;
+  fail_run?: boolean;
+}
+
+export interface AgentRunReport {
+  run_id: string;
+  outcome: string;
+  summary: string;
+  task: AgentTask;
+  mode: string;
+  agent: string;
+  model: string;
+  template?: string | null;
+  hardness: string;
+  sandbox_id?: string | null;
+  branch?: string | null;
+  commit?: string | null;
+  pr_url?: string | null;
+  diff_stats: { files_changed: number; additions: number; deletions: number; bytes: number };
+  changed_files: { path: string; status: string; additions: number; deletions: number }[];
+  constraints: { passed: boolean; violations: string[] };
+  verification: {
+    name: string;
+    command: string;
+    exit_code: number;
+    passed: boolean;
+    fail_run: boolean;
+    duration_ms: number;
+    stdout_tail: string;
+    stderr_tail: string;
+  }[];
+  artifacts: { path: string; bytes: number; content?: string | null; truncated: boolean }[];
+  error?: string | null;
+  stdout_tail: string;
+  stderr_tail: string;
+  logs_truncated: boolean;
+  duration_ms?: number | null;
+  generated_at: string;
 }
 
 export interface AgentRun {
   id: string;
-  state: "queued" | "running" | "succeeded" | "failed" | string;
+  state: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
   sandbox_id?: string | null;
   template?: string | null;
   repo: { url: string; ref?: string };
@@ -143,7 +214,16 @@ export interface AgentRun {
   hardness: string;
   loop?: Record<string, unknown>;
   github?: Record<string, unknown> | null;
+  task?: AgentTask;
+  mode?: string;
+  constraints?: AgentConstraints;
+  context?: AgentContext;
+  verify?: AgentVerifyCommand[];
   verification_result?: string | null;
+  verification_results?: AgentRunReport["verification"];
+  artifacts?: AgentRunReport["artifacts"];
+  constraint_result?: AgentRunReport["constraints"] | null;
+  report?: AgentRunReport | null;
   branch?: string | null;
   commit?: string | null;
   pr_url?: string | null;
@@ -154,6 +234,8 @@ export interface AgentRun {
   finished_at?: string | null;
   status_url?: string;
   logs_url?: string;
+  report_url?: string;
+  children_url?: string;
 }
 
 export interface AgentRunLogs {
@@ -163,6 +245,12 @@ export interface AgentRunLogs {
   stderr: string;
   diff: string;
   truncated: boolean;
+}
+
+export interface AgentRunListFilters {
+  parent_run_id?: string;
+  label?: string;
+  state?: string;
 }
 
 export class SandboxError extends Error {
@@ -369,12 +457,37 @@ class AgentRuns {
   get(id: string) {
     return this.http.request<AgentRun>("GET", `/v1/agent-runs/${id}`);
   }
-  list() {
-    return this.http.request<{ agent_runs: AgentRun[] }>("GET", "/v1/agent-runs")
+  list(filters: AgentRunListFilters = {}) {
+    const qs = new URLSearchParams();
+    if (filters.parent_run_id) qs.set("parent_run_id", filters.parent_run_id);
+    if (filters.label) qs.set("label", filters.label);
+    if (filters.state) qs.set("state", filters.state);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return this.http.request<{ agent_runs: AgentRun[] }>("GET", `/v1/agent-runs${suffix}`)
       .then((r) => r.agent_runs);
   }
   logs(id: string) {
     return this.http.request<AgentRunLogs>("GET", `/v1/agent-runs/${id}/logs`);
+  }
+  report(id: string) {
+    return this.http.request<AgentRunReport>("GET", `/v1/agent-runs/${id}/report`);
+  }
+  children(id: string) {
+    return this.http.request<{ agent_runs: AgentRun[] }>("GET", `/v1/agent-runs/${id}/children`)
+      .then((r) => r.agent_runs);
+  }
+  cancel(id: string) {
+    return this.http.request<AgentRun>("POST", `/v1/agent-runs/${id}/cancel`);
+  }
+  async wait(id: string, opts: { intervalMs?: number; timeoutMs?: number } = {}) {
+    const intervalMs = opts.intervalMs ?? 2000;
+    const deadline = Date.now() + (opts.timeoutMs ?? 30 * 60 * 1000);
+    while (true) {
+      const run = await this.get(id);
+      if (run.state !== "queued" && run.state !== "running") return run;
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for agent run ${id}`);
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
   }
 }
 

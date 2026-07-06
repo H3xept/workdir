@@ -723,6 +723,7 @@ pub enum AgentRunState {
     Running,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 impl AgentRunState {
@@ -732,6 +733,7 @@ impl AgentRunState {
             AgentRunState::Running => "running",
             AgentRunState::Succeeded => "succeeded",
             AgentRunState::Failed => "failed",
+            AgentRunState::Cancelled => "cancelled",
         }
     }
 }
@@ -796,6 +798,170 @@ pub struct AgentGithubConfig {
     pub draft: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunMode {
+    #[default]
+    Change,
+    Review,
+}
+
+impl AgentRunMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentRunMode::Change => "change",
+            AgentRunMode::Review => "review",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentTask {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentConstraints {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_changed_files: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_diff_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runtime_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_artifact_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<AgentContextFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<AgentContextLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentContextFile {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentContextLink {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentVerifyCommand {
+    pub name: String,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_run: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentChangedFile {
+    pub path: String,
+    pub status: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentDiffStats {
+    pub files_changed: usize,
+    pub additions: u32,
+    pub deletions: u32,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentConstraintResult {
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentVerificationResult {
+    pub name: String,
+    pub command: String,
+    pub exit_code: i32,
+    pub passed: bool,
+    pub fail_run: bool,
+    pub duration_ms: u64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentArtifact {
+    pub path: String,
+    pub bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRunReport {
+    pub run_id: String,
+    pub outcome: String,
+    pub summary: String,
+    pub task: AgentTask,
+    pub mode: String,
+    pub agent: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    pub hardness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    pub diff_stats: AgentDiffStats,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<AgentChangedFile>,
+    pub constraints: AgentConstraintResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<AgentVerificationResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<AgentArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+    pub logs_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub generated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateAgentRunRequest {
     #[serde(default)]
@@ -811,6 +977,16 @@ pub struct CreateAgentRunRequest {
     pub r#loop: Option<AgentLoopConfig>,
     #[serde(default)]
     pub github: Option<AgentGithubConfig>,
+    #[serde(default)]
+    pub task: Option<AgentTask>,
+    #[serde(default)]
+    pub mode: Option<AgentRunMode>,
+    #[serde(default)]
+    pub constraints: Option<AgentConstraints>,
+    #[serde(default)]
+    pub context: Option<AgentContext>,
+    #[serde(default)]
+    pub verify: Vec<AgentVerifyCommand>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -832,6 +1008,24 @@ pub struct AgentRun {
     pub r#loop: AgentLoopConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<AgentGithubConfig>,
+    #[serde(default)]
+    pub task: AgentTask,
+    #[serde(default)]
+    pub mode: AgentRunMode,
+    #[serde(default)]
+    pub constraints: AgentConstraints,
+    #[serde(default)]
+    pub context: AgentContext,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verify: Vec<AgentVerifyCommand>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_results: Vec<AgentVerificationResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<AgentArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint_result: Option<AgentConstraintResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<AgentRunReport>,
     #[serde(default)]
     pub stdout: String,
     #[serde(default)]

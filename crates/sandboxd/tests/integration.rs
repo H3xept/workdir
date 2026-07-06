@@ -60,6 +60,31 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
+async fn poll_agent_run(
+    c: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    run_id: &str,
+) -> serde_json::Value {
+    let mut status = serde_json::json!({});
+    for _ in 0..150 {
+        status = c
+            .get(format!("{base}/v1/agent-runs/{run_id}"))
+            .header("authorization", auth)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        if status["state"] != "queued" && status["state"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    status
+}
+
 #[tokio::test]
 async fn one_node_acceptance_flow() {
     let (base, key, _tmp) = spawn_server().await;
@@ -688,9 +713,10 @@ async fn agent_run_uses_template_collects_diff_and_redacts_secret() {
         .unwrap();
     assert_eq!(stored["stored"], true);
 
-    let fake_codex =
-        "cat >/dev/null\nprintf \"secret=$OPENAI_API_KEY\\n\"\necho changed > agent.txt\n";
-    let script_cmd = format!("cat > codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x codex");
+    let fake_codex = "cat >/dev/null\nprintf \"secret=$OPENAI_API_KEY\\n\"\necho changed > agent.txt\nmkdir -p .workdir/artifacts\necho handoff > .workdir/artifacts/report.txt\n";
+    let script_cmd = format!(
+        "mkdir -p .workdir/bin\ncat > .workdir/bin/codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x .workdir/bin/codex"
+    );
     let resp = c
         .post(format!("{base}/v1/templates"))
         .header("authorization", &auth)
@@ -718,7 +744,27 @@ async fn agent_run_uses_template_collects_diff_and_redacts_secret() {
             "prompt": "make a deterministic change",
             "model": "test-model",
             "agent": "codex",
-            "api_key_secret": "OPENAI_API_KEY"
+            "api_key_secret": "OPENAI_API_KEY",
+            "task": {
+                "name": "Update agent fixture",
+                "external_id": "task-123",
+                "labels": ["delegation", "smoke"],
+                "priority": 7
+            },
+            "constraints": {
+                "allowed_paths": ["agent.txt"],
+                "max_changed_files": 1,
+                "max_diff_bytes": 4096,
+                "max_artifact_bytes": 4096
+            },
+            "context": {
+                "instructions": "Use the fixture task context.",
+                "files": [{ "path": "notes/context.txt", "content": "context note" }],
+                "links": [{ "title": "Example", "url": "https://example.com", "description": "context link" }]
+            },
+            "verify": [
+                { "name": "agent file exists", "run": "test -f agent.txt && cat agent.txt", "fail_run": true }
+            ]
         }))
         .send()
         .await
@@ -748,6 +794,28 @@ async fn agent_run_uses_template_collects_diff_and_redacts_secret() {
     assert_eq!(status["state"], "succeeded", "agent run status: {status}");
     assert!(status["sandbox_id"].is_string());
     assert!(status["pr_url"].is_null());
+    assert_eq!(status["task"]["name"], "Update agent fixture");
+    assert_eq!(status["report"]["outcome"], "succeeded");
+    assert_eq!(status["report"]["diff_stats"]["files_changed"], 1);
+    assert_eq!(status["report"]["changed_files"][0]["path"], "agent.txt");
+    assert_eq!(status["report"]["verification"][0]["passed"], true);
+    assert_eq!(status["report"]["artifacts"][0]["path"], "report.txt");
+    assert_eq!(status["report"]["constraints"]["passed"], true);
+
+    let report: serde_json::Value = c
+        .get(format!("{base}/v1/agent-runs/{run_id}/report"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(report["run_id"], run_id);
+    assert!(report["summary"]
+        .as_str()
+        .unwrap()
+        .contains("Changed 1 file"));
 
     let logs: serde_json::Value = c
         .get(format!("{base}/v1/agent-runs/{run_id}/logs"))
@@ -831,7 +899,9 @@ tokens used
 123
 PATCH
 "#;
-    let script_cmd = format!("cat > codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x codex");
+    let script_cmd = format!(
+        "mkdir -p .workdir/bin\ncat > .workdir/bin/codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x .workdir/bin/codex"
+    );
     let resp = c
         .post(format!("{base}/v1/templates"))
         .header("authorization", &auth)
@@ -899,6 +969,253 @@ PATCH
     let diff = logs["diff"].as_str().unwrap();
     assert!(diff.contains("agent-output.txt"));
     assert!(diff.contains("from printed patch"));
+}
+
+#[tokio::test]
+async fn agent_run_review_mode_children_and_filters() {
+    let (base, key, tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let repo = tmp.path().join("review-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "test"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+
+    let stored: serde_json::Value = c
+        .put(format!("{base}/v1/secrets/OPENAI_API_KEY"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({ "value": "sk-test-review" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["stored"], true);
+
+    let fake_codex = "cat >/dev/null\nmkdir -p .workdir/artifacts\necho finding > .workdir/artifacts/findings.txt\n";
+    let script_cmd = format!(
+        "mkdir -p .workdir/bin\ncat > .workdir/bin/codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x .workdir/bin/codex"
+    );
+    let resp = c
+        .post(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "name": "review-codex",
+            "create": {
+                "startup": {
+                    "commands": [
+                        { "name": "fake-codex", "run": script_cmd }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let parent: serde_json::Value = c
+        .post(format!("{base}/v1/agent-runs"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "template": "review-codex",
+            "repo": { "url": repo.to_string_lossy(), "ref": "main" },
+            "prompt": "review the repository",
+            "mode": "review",
+            "model": "test-model",
+            "agent": "codex",
+            "api_key_secret": "OPENAI_API_KEY",
+            "task": { "name": "Parent review", "labels": ["parent"] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent = poll_agent_run(&c, &base, &auth, &parent_id).await;
+    assert_eq!(parent["state"], "succeeded", "agent run status: {parent}");
+    assert_eq!(parent["report"]["outcome"], "reviewed");
+    assert_eq!(parent["report"]["diff_stats"]["files_changed"], 0);
+    assert_eq!(parent["report"]["artifacts"][0]["path"], "findings.txt");
+
+    let child: serde_json::Value = c
+        .post(format!("{base}/v1/agent-runs"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "template": "review-codex",
+            "repo": { "url": repo.to_string_lossy(), "ref": "main" },
+            "prompt": "review a delegated subtask",
+            "mode": "review",
+            "model": "test-model",
+            "agent": "codex",
+            "api_key_secret": "OPENAI_API_KEY",
+            "task": {
+                "name": "Child review",
+                "parent_run_id": parent_id,
+                "labels": ["delegated", "review"]
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+    let child = poll_agent_run(&c, &base, &auth, &child_id).await;
+    assert_eq!(child["state"], "succeeded", "agent run status: {child}");
+
+    let children: serde_json::Value = c
+        .get(format!("{base}/v1/agent-runs/{parent_id}/children"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(children["agent_runs"][0]["id"], child_id);
+
+    let filtered: serde_json::Value = c
+        .get(format!(
+            "{base}/v1/agent-runs?parent_run_id={parent_id}&label=delegated&state=succeeded"
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered["agent_runs"][0]["id"], child_id);
+    assert_eq!(filtered["agent_runs"][0]["report"]["outcome"], "reviewed");
+}
+
+#[tokio::test]
+async fn agent_run_constraints_fail_before_pr() {
+    let (base, key, tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let repo = tmp.path().join("constraint-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["config", "user.name", "test"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+
+    let stored: serde_json::Value = c
+        .put(format!("{base}/v1/secrets/OPENAI_API_KEY"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({ "value": "sk-test-constraints" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["stored"], true);
+
+    let fake_codex = "cat >/dev/null\necho blocked > blocked.txt\n";
+    let script_cmd = format!(
+        "mkdir -p .workdir/bin\ncat > .workdir/bin/codex <<'EOF'\n#!/bin/sh\n{fake_codex}EOF\nchmod +x .workdir/bin/codex"
+    );
+    let resp = c
+        .post(format!("{base}/v1/templates"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "name": "blocked-codex",
+            "create": {
+                "startup": {
+                    "commands": [
+                        { "name": "fake-codex", "run": script_cmd }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let launched: serde_json::Value = c
+        .post(format!("{base}/v1/agent-runs"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "template": "blocked-codex",
+            "repo": { "url": repo.to_string_lossy(), "ref": "main" },
+            "prompt": "make a blocked change",
+            "model": "test-model",
+            "agent": "codex",
+            "api_key_secret": "OPENAI_API_KEY",
+            "constraints": { "blocked_paths": ["blocked.txt"] }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run_id = launched["id"].as_str().unwrap().to_string();
+    let status = poll_agent_run(&c, &base, &auth, &run_id).await;
+    assert_eq!(status["state"], "failed", "agent run status: {status}");
+    assert_eq!(status["report"]["outcome"], "constraint_failed");
+    assert_eq!(status["report"]["constraints"]["passed"], false);
+    assert!(status["error"]
+        .as_str()
+        .unwrap()
+        .contains("constraints violated"));
+    assert!(status["pr_url"].is_null());
 }
 
 #[tokio::test]

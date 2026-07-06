@@ -37,16 +37,18 @@ Uses only the standard library (urllib), so it has zero dependencies.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "AgentRun",
     "AgentRunLogs",
+    "AgentRunReport",
     "Client",
     "ExecJob",
     "ExecLogs",
@@ -120,7 +122,16 @@ class AgentRun:
     template: Optional[str] = None
     loop: Optional[dict] = None
     github: Optional[dict] = None
+    task: Optional[dict] = None
+    mode: Optional[str] = None
+    constraints: Optional[dict] = None
+    context: Optional[dict] = None
+    verify: Optional[list[dict]] = None
     verification_result: Optional[str] = None
+    verification_results: Optional[list[dict]] = None
+    artifacts: Optional[list[dict]] = None
+    constraint_result: Optional[dict] = None
+    report: Optional["AgentRunReport"] = None
     branch: Optional[str] = None
     commit: Optional[str] = None
     pr_url: Optional[str] = None
@@ -129,6 +140,36 @@ class AgentRun:
     finished_at: Optional[str] = None
     status_url: Optional[str] = None
     logs_url: Optional[str] = None
+    report_url: Optional[str] = None
+    children_url: Optional[str] = None
+
+
+@dataclass
+class AgentRunReport:
+    run_id: str
+    outcome: str
+    summary: str
+    task: dict
+    mode: str
+    agent: str
+    model: str
+    hardness: str
+    diff_stats: dict
+    changed_files: list[dict]
+    constraints: dict
+    verification: list[dict]
+    artifacts: list[dict]
+    stdout_tail: str
+    stderr_tail: str
+    logs_truncated: bool
+    generated_at: str
+    template: Optional[str] = None
+    sandbox_id: Optional[str] = None
+    branch: Optional[str] = None
+    commit: Optional[str] = None
+    pr_url: Optional[str] = None
+    error: Optional[str] = None
+    duration_ms: Optional[int] = None
 
 
 @dataclass
@@ -392,8 +433,23 @@ class _AgentRuns:
     def get(self, run_id: str) -> AgentRun:
         return _agent_run(self._http.request("GET", f"/v1/agent-runs/{run_id}"))
 
-    def list(self) -> list[AgentRun]:
-        data = self._http.request("GET", "/v1/agent-runs")
+    def list(
+        self,
+        parent_run_id: Optional[str] = None,
+        label: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> list[AgentRun]:
+        query = {
+            k: v
+            for k, v in {
+                "parent_run_id": parent_run_id,
+                "label": label,
+                "state": state,
+            }.items()
+            if v is not None
+        }
+        suffix = f"?{urllib.parse.urlencode(query)}" if query else ""
+        data = self._http.request("GET", f"/v1/agent-runs{suffix}")
         return [_agent_run(r) for r in data.get("agent_runs", [])]
 
     def logs(self, run_id: str) -> AgentRunLogs:
@@ -406,6 +462,31 @@ class _AgentRuns:
             diff=r["diff"],
             truncated=bool(r.get("truncated", False)),
         )
+
+    def report(self, run_id: str) -> AgentRunReport:
+        return _agent_run_report(self._http.request("GET", f"/v1/agent-runs/{run_id}/report"))
+
+    def children(self, run_id: str) -> list[AgentRun]:
+        data = self._http.request("GET", f"/v1/agent-runs/{run_id}/children")
+        return [_agent_run(r) for r in data.get("agent_runs", [])]
+
+    def cancel(self, run_id: str) -> AgentRun:
+        return _agent_run(self._http.request("POST", f"/v1/agent-runs/{run_id}/cancel"))
+
+    def wait(
+        self,
+        run_id: str,
+        interval_seconds: float = 2.0,
+        timeout_seconds: float = 30 * 60,
+    ) -> AgentRun:
+        deadline = time.time() + timeout_seconds
+        while True:
+            run = self.get(run_id)
+            if run.state not in {"queued", "running"}:
+                return run
+            if time.time() >= deadline:
+                raise TimeoutError(f"timed out waiting for agent run {run_id}")
+            time.sleep(interval_seconds)
 
 
 def _template(r: dict) -> SandboxTemplate:
@@ -433,7 +514,16 @@ def _agent_run(r: dict) -> AgentRun:
         hardness=r["hardness"],
         loop=r.get("loop"),
         github=r.get("github"),
+        task=r.get("task"),
+        mode=r.get("mode"),
+        constraints=r.get("constraints"),
+        context=r.get("context"),
+        verify=r.get("verify"),
         verification_result=r.get("verification_result"),
+        verification_results=r.get("verification_results"),
+        artifacts=r.get("artifacts"),
+        constraint_result=r.get("constraint_result"),
+        report=_agent_run_report(r["report"]) if isinstance(r.get("report"), dict) else None,
         branch=r.get("branch"),
         commit=r.get("commit"),
         pr_url=r.get("pr_url"),
@@ -444,6 +534,37 @@ def _agent_run(r: dict) -> AgentRun:
         finished_at=r.get("finished_at"),
         status_url=r.get("status_url"),
         logs_url=r.get("logs_url"),
+        report_url=r.get("report_url"),
+        children_url=r.get("children_url"),
+    )
+
+
+def _agent_run_report(r: dict) -> AgentRunReport:
+    return AgentRunReport(
+        run_id=r["run_id"],
+        outcome=r["outcome"],
+        summary=r["summary"],
+        task=r.get("task") or {},
+        mode=r["mode"],
+        agent=r["agent"],
+        model=r["model"],
+        template=r.get("template"),
+        hardness=r["hardness"],
+        sandbox_id=r.get("sandbox_id"),
+        branch=r.get("branch"),
+        commit=r.get("commit"),
+        pr_url=r.get("pr_url"),
+        diff_stats=r.get("diff_stats") or {},
+        changed_files=r.get("changed_files") or [],
+        constraints=r.get("constraints") or {},
+        verification=r.get("verification") or [],
+        artifacts=r.get("artifacts") or [],
+        error=r.get("error"),
+        stdout_tail=r.get("stdout_tail", ""),
+        stderr_tail=r.get("stderr_tail", ""),
+        logs_truncated=bool(r.get("logs_truncated", False)),
+        duration_ms=r.get("duration_ms"),
+        generated_at=r["generated_at"],
     )
 
 

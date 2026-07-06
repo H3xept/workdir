@@ -224,7 +224,8 @@ POST /v1/templates/node-app/sandboxes
 
 Agent runs build on templates. Workdir creates a sandbox, passes the model
 provider key only to the agent process, runs Codex or Claude Code, collects the
-staged git diff, and can open a GitHub PR from the control plane:
+staged git diff, creates a backend report for a main agent, and can open a
+GitHub PR from the control plane:
 
 ```jsonc
 POST /v1/agent-runs
@@ -236,6 +237,9 @@ POST /v1/agent-runs
   "api_key_secret": "OPENAI_API_KEY",
   "prompt": "Fix the failing tests.",
   "hardness": "medium",
+  "task": { "name": "Fix tests", "labels": ["delegated"] },
+  "constraints": { "max_changed_files": 6 },
+  "verify": [{ "name": "tests", "run": "npm test", "fail_run": true }],
   "github": { "token_secret": "GITHUB_TOKEN", "draft": true }
 }
 ```
@@ -250,6 +254,8 @@ the profile defaults. GitHub write tokens are not injected into the sandbox; the
 control plane uses them to create the branch, commit, push, and PR.
 Prompt the sandbox agent to edit files and leave a diff. Workdir handles the
 GitHub branch, commit, push, and PR after the agent exits.
+Use `GET /v1/agent-runs/:id/report` for the deterministic handoff report, and
+`mode: "review"` for inspection-only subtasks that should not require a diff.
 
 ---
 

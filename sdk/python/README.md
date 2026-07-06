@@ -41,10 +41,13 @@ run = workdir.agent_runs.create(
     agent="codex",
     model="gpt-5",
     api_key_secret="OPENAI_API_KEY",
-    prompt="Fix the failing tests.",
+    prompt="Fix the failing tests and leave a clean diff.",
+    task={"name": "Fix failing tests", "labels": ["delegated"]},
+    verify=[{"name": "tests", "run": "pnpm test", "fail_run": True}],
     github={"token_secret": "GITHUB_TOKEN", "draft": True},
 )
-print(run.status_url)
+finished = workdir.agent_runs.wait(run.id)
+print(workdir.agent_runs.report(finished.id).summary)
 ```
 
 The SDK uses only the Python standard library.

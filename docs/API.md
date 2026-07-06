@@ -62,14 +62,18 @@ JSON body accepted by `POST /v1/sandboxes`.
 
 Agent runs create a sandbox from a template or hardness profile, run Codex or
 Claude Code inside it, collect a staged git diff, and optionally open a GitHub
-PR from the control plane. Provider keys and GitHub tokens are referenced by
+PR from the control plane. They also produce a backend-generated report for
+main-agent orchestration. Provider keys and GitHub tokens are referenced by
 secret name; secret values are never returned.
 
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/agent-runs` | Start an async run → `202 {id, state, status_url, logs_url}`. |
-| `GET` | `/v1/agent-runs` | List runs. |
-| `GET` | `/v1/agent-runs/:id` | Status, sandbox id, branch/commit/PR URL, error. |
+| `GET` | `/v1/agent-runs` | List runs. Supports `parent_run_id`, `label`, and `state` filters. |
+| `GET` | `/v1/agent-runs/:id` | Status, sandbox id, report, branch/commit/PR URL, error. |
+| `GET` | `/v1/agent-runs/:id/report` | Backend-generated run report. |
+| `GET` | `/v1/agent-runs/:id/children` | Runs whose `task.parent_run_id` is this id. |
+| `POST` | `/v1/agent-runs/:id/cancel` | Cooperatively cancel a queued/running run. |
 | `GET` | `/v1/agent-runs/:id/logs` | Captured stdout/stderr and staged diff. |
 
 ```jsonc
@@ -81,7 +85,12 @@ secret name; secret values are never returned.
   "api_key_secret": "OPENAI_API_KEY",
   "prompt": "Fix the failing tests and keep the change minimal.",
   "hardness": "medium",              // easy | medium | hard
+  "task": { "name": "Fix auth test failures", "labels": ["auth", "delegated"] },
+  "mode": "change",                  // change | review
   "loop": { "goal": "Fix the failing tests and leave the repo with a clean diff.", "max_iterations": 2 },
+  "constraints": { "allowed_paths": ["src/auth", "tests/auth"], "max_changed_files": 8 },
+  "context": { "instructions": "Keep the public API stable." },
+  "verify": [{ "name": "auth tests", "run": "cargo test auth", "fail_run": true }],
   "github": { "token_secret": "GITHUB_TOKEN", "base_branch": "main", "draft": true }
 }
 ```
@@ -97,6 +106,11 @@ selected CLI's required environment variable (`CODEX_API_KEY` for Codex,
 Agent prompts and loop goals should ask the agent to modify files in the cloned
 repo. The sandbox agent should not commit, push, or create the PR; Workdir does
 that headlessly from the collected diff.
+
+Use `mode: "review"` for inspection-only subtasks. Review runs do not require a
+diff or PR. Reports include outcome, summary, changed files, verification
+results, artifacts from `.workdir/artifacts/`, constraints, branch/commit/PR,
+and stdout/stderr tails.
 
 ### Lifecycle & perpetual standby
 

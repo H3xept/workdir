@@ -194,16 +194,23 @@ const run = await wd.agentRuns.create({
   agent: "codex",
   model: "gpt-5",
   api_key_secret: "OPENAI_API_KEY",
-  prompt: "Fix the failing tests and open a small PR.",
+  prompt: "Fix the failing tests and leave a clean diff.",
+  task: { name: "Fix failing tests", labels: ["delegated"] },
+  constraints: { max_changed_files: 8 },
+  verify: [{ name: "tests", run: "pnpm test", fail_run: true }],
   github: { token_secret: "GITHUB_TOKEN", draft: true },
 });
-console.log(run.status_url);
+const finished = await wd.agentRuns.wait(run.id);
+const report = await wd.agentRuns.report(finished.id);
+console.log(report.summary, finished.pr_url);
 ```
 
 `api_key_secret` is the Workdir secret name containing the provider key. Workdir
 maps it to the CLI-specific environment variable for the selected agent
 (`CODEX_API_KEY` for Codex, `ANTHROPIC_API_KEY` for Claude Code). The GitHub
-token is used only by the control plane to create the branch and PR.
+token is used only by the control plane to create the branch and PR. Main agents
+can pass `task.parent_run_id` and read `agentRuns.children(id)` to reconcile
+delegated subtasks.
 
 #### Network egress policy
 

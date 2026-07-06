@@ -117,6 +117,9 @@ pub fn router(state: AppState) -> Router {
             get(agent_runs::list).post(agent_runs::create),
         )
         .route("/agent-runs/:id", get(agent_runs::get))
+        .route("/agent-runs/:id/report", get(agent_runs::report))
+        .route("/agent-runs/:id/children", get(agent_runs::children))
+        .route("/agent-runs/:id/cancel", post(agent_runs::cancel))
         .route("/agent-runs/:id/logs", get(agent_runs::logs))
         .layer(middleware::from_fn_with_state(state.clone(), auth_mw));
 
