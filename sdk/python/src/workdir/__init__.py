@@ -44,7 +44,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 __all__ = [
     "AgentRun",
     "AgentRunLogs",

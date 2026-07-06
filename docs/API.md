@@ -69,10 +69,10 @@ secret name; secret values are never returned.
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/v1/agent-runs` | Start an async run → `202 {id, state, status_url, logs_url}`. |
-| `GET` | `/v1/agent-runs` | List runs. Supports `parent_run_id`, `label`, and `state` filters. |
+| `GET` | `/v1/agent-runs` | List runs with compact report fields. Supports `parent_run_id`, `label`, and `state` filters. |
 | `GET` | `/v1/agent-runs/:id` | Status, sandbox id, report, branch/commit/PR URL, error. |
 | `GET` | `/v1/agent-runs/:id/report` | Backend-generated run report. |
-| `GET` | `/v1/agent-runs/:id/children` | Runs whose `task.parent_run_id` is this id. |
+| `GET` | `/v1/agent-runs/:id/children` | Runs whose `task.parent_run_id` is this id, with compact report fields. |
 | `POST` | `/v1/agent-runs/:id/cancel` | Cooperatively cancel a queued/running run. |
 | `GET` | `/v1/agent-runs/:id/logs` | Captured stdout/stderr and staged diff. |
 
@@ -111,6 +111,10 @@ Use `mode: "review"` for inspection-only subtasks. Review runs do not require a
 diff or PR. Reports include outcome, summary, changed files, verification
 results, artifacts from `.workdir/artifacts/`, constraints, branch/commit/PR,
 and stdout/stderr tails.
+
+List and children endpoints return compact report summaries for orchestration
+dashboards. Use `GET /v1/agent-runs/:id/report` when a delegating agent needs
+the full authoritative report.
 
 ### Lifecycle & perpetual standby
 
