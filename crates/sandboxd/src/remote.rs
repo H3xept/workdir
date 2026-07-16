@@ -14,8 +14,10 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::json;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 pub const NODE_TOKEN_HEADER: &str = "X-Node-Token";
+const IMAGE_AVAILABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct RemoteNodeClient {
     node_id: String,
@@ -207,6 +209,21 @@ impl NodeClient for RemoteNodeClient {
         self.post_json("/internal/delete", json!({ "handle": handle }))
             .await?;
         Ok(())
+    }
+
+    async fn image_available(&self, image_key: &str) -> bool {
+        tokio::time::timeout(
+            IMAGE_AVAILABILITY_TIMEOUT,
+            self.post_json(
+                "/internal/image_available",
+                json!({ "image_key": image_key }),
+            ),
+        )
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+        .and_then(|v| v.get("available").and_then(|a| a.as_bool()))
+        .unwrap_or(false)
     }
 
     async fn hot_pool_available(&self, image_key: &str, resources: &Resources) -> u32 {

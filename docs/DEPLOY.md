@@ -126,13 +126,16 @@ want available:
 ```bash
 cargo build --release -p guest-agent
 sudo bash deploy/build-image.sh base
+sudo bash deploy/build-image.sh heavy-build 64G  # Docker-in-Docker + Compose
 sudo bash deploy/build-image.sh browser 8G   # optional browser image
 sudo systemctl restart workdir
 ```
 
 The fuller `deploy/provision-node.sh` path performs kernel download, base image
-build, and node setup from a repo checkout. See [docs/RUNBOOK.md](RUNBOOK.md)
-for the day-2 image build and rebuild flow.
+and `heavy-build` image builds, and node setup from a repo checkout. It boots a
+`heavy-build` sandbox and verifies Docker, Compose, a nested container, and HTTPS
+egress before completing. See [docs/RUNBOOK.md](RUNBOOK.md) for the day-2 image
+build and rebuild flow.
 
 ---
 

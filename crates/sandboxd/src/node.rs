@@ -62,6 +62,10 @@ pub trait NodeClient: Send + Sync {
     async fn fork(&self, parent_handle: &str, child_spec: &VmSpec) -> Result<VmInstance>;
     async fn delete(&self, handle: &str) -> Result<()>;
 
+    /// Whether this node currently has the requested curated image artifact.
+    /// Remote clients fail closed when the worker cannot answer.
+    async fn image_available(&self, image_key: &str) -> bool;
+
     /// Ready warm VMs matching an exact image+shape, for the scheduler input.
     async fn hot_pool_available(&self, image_key: &str, resources: &Resources) -> u32;
 
@@ -269,6 +273,10 @@ impl NodeClient for LocalNode {
     }
     async fn delete(&self, handle: &str) -> Result<()> {
         self.runtime.delete(handle).await
+    }
+
+    async fn image_available(&self, image_key: &str) -> bool {
+        self.runtime.image_available(image_key)
     }
 
     async fn hot_pool_available(&self, image_key: &str, resources: &Resources) -> u32 {

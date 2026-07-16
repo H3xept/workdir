@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router<AppState> {
         .route("/snapshot", post(snapshot))
         .route("/fork", post(fork))
         .route("/delete", post(delete))
+        .route("/image_available", post(image_available))
         .route("/hot_pool_available", post(hot_pool_available))
         // State for routes is provided by the outer router's `.with_state`.
         .layer(middleware::from_fn_with_state(state, node_auth))
@@ -205,6 +206,15 @@ async fn fork(State(s): State<AppState>, Json(r): Json<ForkReq>) -> R {
 async fn delete(State(s): State<AppState>, Json(r): Json<HandleReq>) -> R {
     s.local.delete(&r.handle).await.map_err(err)?;
     Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct ImageReq {
+    image_key: String,
+}
+async fn image_available(State(s): State<AppState>, Json(r): Json<ImageReq>) -> R {
+    let available = s.local.image_available(&r.image_key).await;
+    Ok(Json(json!({ "available": available })))
 }
 
 #[derive(Deserialize)]

@@ -99,6 +99,9 @@ pub fn score_node(req: &PlacementRequest, snap: &NodeSnapshot) -> Option<f64> {
     if !snap.node.is_available() {
         return None;
     }
+    if !req.is_custom_image && !snap.image_cached {
+        return None;
+    }
     if req.browser_required && snap.node.total_memory_gb < 16.0 {
         // Browser shapes need real RAM; tiny nodes are not eligible.
         return None;
@@ -152,14 +155,27 @@ pub fn select(req: &PlacementRequest, snapshots: &[NodeSnapshot]) -> Result<Plac
             detail: "all nodes are draining or unschedulable".to_string(),
         });
     }
+    if !req.is_custom_image && !schedulable.iter().any(|s| s.image_cached) {
+        return Err(Rejection {
+            reason: "image_unavailable".to_string(),
+            detail: format!(
+                "image '{}' is unavailable on all schedulable nodes",
+                req.image_key
+            ),
+        });
+    }
+    let image_capable: Vec<&NodeSnapshot> = schedulable
+        .into_iter()
+        .filter(|snap| req.is_custom_image || snap.image_cached)
+        .collect();
     // If browser is required but no node is large enough.
-    if req.browser_required && !schedulable.iter().any(|s| s.node.total_memory_gb >= 16.0) {
+    if req.browser_required && !image_capable.iter().any(|s| s.node.total_memory_gb >= 16.0) {
         return Err(Rejection {
             reason: "no_browser_capable_node".to_string(),
             detail: "no node has enough memory for a browser sandbox".to_string(),
         });
     }
-    let any_fit = schedulable.iter().any(|s| s.fits(&req.resources));
+    let any_fit = image_capable.iter().any(|s| s.fits(&req.resources));
     if !any_fit {
         return Err(Rejection {
             reason: "memory_admission".to_string(),
@@ -171,7 +187,7 @@ pub fn select(req: &PlacementRequest, snapshots: &[NodeSnapshot]) -> Result<Plac
     }
 
     let mut best: Option<(f64, &NodeSnapshot)> = None;
-    for snap in &schedulable {
+    for snap in &image_capable {
         if let Some(score) = score_node(req, snap) {
             if best.as_ref().map(|(b, _)| score > *b).unwrap_or(true) {
                 best = Some((score, snap));
@@ -270,6 +286,37 @@ mod tests {
         a.node.draining = true;
         let err = select(&base_req(), &[a]).unwrap_err();
         assert_eq!(err.reason, "no_schedulable_nodes");
+    }
+
+    #[test]
+    fn rejects_unavailable_curated_image() {
+        let mut a = snap(node("a", 64.0));
+        a.image_cached = false;
+        let err = select(&base_req(), &[a]).unwrap_err();
+        assert_eq!(err.reason, "image_unavailable");
+        assert_eq!(
+            err.detail,
+            "image 'base' is unavailable on all schedulable nodes"
+        );
+    }
+
+    #[test]
+    fn skips_nodes_missing_curated_image() {
+        let mut missing = snap(node("missing", 64.0));
+        missing.image_cached = false;
+        let present = snap(node("present", 64.0));
+        let placement = select(&base_req(), &[missing, present]).unwrap();
+        assert_eq!(placement.node_id, "present");
+    }
+
+    #[test]
+    fn capacity_is_checked_only_on_nodes_with_the_curated_image() {
+        let mut missing = snap(node("missing", 64.0));
+        missing.image_cached = false;
+        let mut present = snap(node("present", 64.0));
+        present.used_memory_gb = 40.0;
+        let err = select(&base_req(), &[missing, present]).unwrap_err();
+        assert_eq!(err.reason, "memory_admission");
     }
 
     #[test]

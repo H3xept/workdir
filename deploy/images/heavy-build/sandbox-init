@@ -1,0 +1,41 @@
+#!/bin/sh
+# PID 1 for the Docker-capable heavy-build microVM. The runtime starts dockerd
+# after the guest agent is reachable, so this init only prepares the kernel
+# mounts, networking, and vsock bridge required by both the agent and dockerd.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts /sys/fs/cgroup /workspace /run /tmp /var/log
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+
+ip link set lo up
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /etc/hosts
+
+WDIP=""; WDGW=""; WDDNS="1.1.1.1"
+# /proc/cmdline is intentionally parsed as whitespace-delimited kernel tokens.
+# shellcheck disable=SC2013
+for tok in $(cat /proc/cmdline); do
+  case "$tok" in
+    wd.ip=*)  WDIP=${tok#wd.ip=} ;;
+    wd.gw=*)  WDGW=${tok#wd.gw=} ;;
+    wd.dns=*) WDDNS=${tok#wd.dns=} ;;
+  esac
+done
+
+if [ -n "$WDIP" ]; then
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    ip link show eth0 >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  ip addr add "$WDIP/16" dev eth0
+  ip link set eth0 up
+  ip route add default via "$WDGW"
+  rm -f /etc/resolv.conf
+  printf 'nameserver %s\n' "$WDDNS" > /etc/resolv.conf
+fi
+
+echo "workdir heavy-build guest: ip=$WDIP gw=$WDGW; agent on vsock 5005" > /dev/console 2>&1
+exec /usr/bin/socat VSOCK-LISTEN:5005,fork,reuseaddr EXEC:/usr/local/bin/sandbox-guest-agent

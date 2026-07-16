@@ -4,6 +4,8 @@
 
 use sandboxd::app::build_state;
 use sandboxd::config::Config;
+use sandboxd::node::NodeClient;
+use sandboxd::remote::RemoteNodeClient;
 use sandboxd::state::AppState;
 
 async fn spawn_server() -> (String, String, tempfile::TempDir) {
@@ -500,6 +502,85 @@ async fn docker_requires_capable_image() {
         .await
         .unwrap();
     assert_eq!(sb["docker"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn unavailable_curated_image_is_rejected_before_create() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config(tmp.path());
+    cfg.runtime.kind = "firecracker".into();
+    cfg.node.rpc_token = "test-node-token".into();
+    std::fs::create_dir_all(cfg.runtime.images_dir.join("base")).unwrap();
+    std::fs::write(cfg.runtime.images_dir.join("base/rootfs.ext4"), []).unwrap();
+    let org_id = cfg.auth.bootstrap_org.clone();
+    let state = build_state(cfg).await.expect("build firecracker state");
+
+    // CI has no KVM. Mark the registered node schedulable so this test reaches
+    // image admission, which is intentionally before any Firecracker boot.
+    let mut node = state.store.get_node(&state.local_node_id).unwrap().unwrap();
+    node.kvm_ok = true;
+    state.store.put_node(&node).unwrap();
+
+    let app = sandboxd::api::router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let worker = RemoteNodeClient::new(
+        "worker-test",
+        format!("http://{addr}"),
+        "test-node-token",
+        client(),
+    );
+    assert!(worker.image_available("base").await);
+    assert!(!worker.image_available("heavy-build").await);
+    let unauthenticated = RemoteNodeClient::new(
+        "worker-test",
+        format!("http://{addr}"),
+        "bad-token",
+        client(),
+    );
+    assert!(!unauthenticated.image_available("base").await);
+
+    let stalled_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stalled_addr = stalled_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (_stream, _) = stalled_listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    });
+    let stalled = RemoteNodeClient::new(
+        "stalled-worker",
+        format!("http://{stalled_addr}"),
+        "test-node-token",
+        client(),
+    );
+    let timeout_started = std::time::Instant::now();
+    assert!(!stalled.image_available("base").await);
+    assert!(timeout_started.elapsed() < std::time::Duration::from_secs(3));
+
+    let response = client()
+        .post(format!("http://{addr}/v1/sandboxes"))
+        .header("authorization", "Bearer sk_live_test")
+        .json(&serde_json::json!({
+            "image": "heavy-build",
+            "resources": {"cpu": 2, "memory_mb": 8192, "disk_gb": 32},
+            "docker": {"enabled": true}
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 503);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_capacity");
+    assert_eq!(body["error"]["reason"], "image_unavailable");
+    assert!(state
+        .store
+        .list_sandboxes_for_org(&org_id)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

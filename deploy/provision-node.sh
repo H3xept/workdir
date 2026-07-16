@@ -34,7 +34,7 @@ log "  /dev/kvm present, virtualization OK"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates git build-essential pkg-config \
+apt-get install -y -qq curl ca-certificates git jq build-essential pkg-config \
   rsync nftables iproute2 ufw >/dev/null
 command -v docker >/dev/null 2>&1 || { log "installing docker"; curl -fsSL https://get.docker.com | sh >/dev/null 2>&1; }
 
@@ -169,7 +169,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   log "installing Rust"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1
 fi
-# shellcheck disable=SC1090
+# shellcheck disable=SC1090,SC1091
 . "$HOME/.cargo/env" 2>/dev/null || . /root/.cargo/env
 log "building workdir (this takes a few minutes)"
 ( cd "$REPO_ROOT" && cargo build --release -p sandboxd )
@@ -189,12 +189,13 @@ if rustup target list --installed 2>/dev/null | grep -q x86_64-unknown-linux-mus
   fi
 fi
 
-# --- 6. base image ---------------------------------------------------------
-log "building base curated image"
+# --- 6. curated images -----------------------------------------------------
+log "building curated images"
 bash "$REPO_ROOT/deploy/build-image.sh" base
 # node-python shares the base contents (bigger disk knob)
 install -d -o workdir -g workdir "$DATA_DIR/images/node-python"
 cp "$DATA_DIR/images/base/rootfs.ext4" "$DATA_DIR/images/node-python/rootfs.ext4"
+bash "$REPO_ROOT/deploy/build-image.sh" heavy-build 64G
 chown -R workdir:workdir "$DATA_DIR/images"
 
 # --- 7. config + service ---------------------------------------------------
@@ -251,7 +252,48 @@ fi
 install -m644 "$REPO_ROOT/deploy/systemd/workdir.service" /etc/systemd/system/workdir.service
 systemctl daemon-reload
 systemctl enable --now workdir >/dev/null 2>&1
-sleep 2
+
+# Boot the freshly built Docker-capable rootfs through the real API/runtime and
+# prove the guest daemon, Compose plugin, nested containers, DNS, and bridge
+# egress before declaring this node provisioned.
+log "smoke-testing heavy-build Docker-in-Docker"
+for _ in $(seq 1 30); do
+  curl -fsS --max-time 2 127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+  sleep 1
+done
+curl -fsS --max-time 2 127.0.0.1:8080/healthz >/dev/null || die "workdir health check failed"
+
+SMOKE_ID=""
+cleanup_smoke() {
+  if [ -n "$SMOKE_ID" ]; then
+    curl -fsS --max-time 10 -X DELETE \
+      -H "Authorization: Bearer $ADMIN_KEY" \
+      "127.0.0.1:8080/v1/sandboxes/$SMOKE_ID" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_smoke EXIT
+
+SMOKE_CREATE=$(curl -fsS --max-time 120 -X POST \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"image":"heavy-build","resources":{"cpu":2,"memory_mb":8192,"disk_gb":32},"docker":{"enabled":true}}' \
+  127.0.0.1:8080/v1/sandboxes) || die "heavy-build sandbox create failed"
+SMOKE_ID=$(jq -er '.id' <<<"$SMOKE_CREATE") || die "heavy-build create returned no sandbox id"
+
+SMOKE_COMMAND='set -eu; mountpoint /sys/fs/cgroup; docker info >/dev/null; docker compose version; docker run --rm alpine:3.20 true; docker run --rm alpine:3.20 wget -qO- https://example.com >/dev/null'
+SMOKE_EXEC=$(jq -n --arg cmd "$SMOKE_COMMAND" '{cmd:$cmd,cwd:"/workspace"}' | \
+  curl -fsS --max-time 180 -X POST \
+    -H "Authorization: Bearer $ADMIN_KEY" \
+    -H 'Content-Type: application/json' \
+    --data-binary @- \
+    "127.0.0.1:8080/v1/sandboxes/$SMOKE_ID/exec") || die "heavy-build Docker smoke exec failed"
+[ "$(jq -er '.exit_code' <<<"$SMOKE_EXEC")" = 0 ] || {
+  jq -r '.stderr // "heavy-build Docker smoke failed"' <<<"$SMOKE_EXEC" >&2
+  die "heavy-build Docker smoke failed"
+}
+cleanup_smoke
+SMOKE_ID=""
+trap - EXIT
 
 log "done."
 echo

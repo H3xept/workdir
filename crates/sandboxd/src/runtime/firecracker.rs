@@ -1195,7 +1195,7 @@ impl FirecrackerRuntime {
             // forwarding, then start dockerd with its NORMAL bridge networking.
             // Result (validated on the node): dockerd up + `docker run` with a
             // default-bridge container reaching the internet — no kernel rebuild.
-            let _ = self
+            let docker = self
                 .agent_call(handle, &json!({
                     "op": "exec",
                     "cmd": "\
@@ -1208,10 +1208,29 @@ impl FirecrackerRuntime {
                         fi; \
                         sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true; \
                         nohup dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 & \
-                        for i in $(seq 1 50); do [ -S /var/run/docker.sock ] && break; sleep 0.2; done",
+                        for i in $(seq 1 50); do \
+                          docker info >/dev/null 2>&1 && exit 0; \
+                          sleep 0.2; \
+                        done; \
+                        cat /var/log/dockerd.log >&2; \
+                        exit 1",
                     "background": false,
                 }))
-                .await;
+                .await
+                .context("start Docker daemon")?;
+            let exit = docker
+                .get("exit_code")
+                .and_then(|code| code.as_i64())
+                .unwrap_or(-1);
+            if exit != 0 {
+                bail!(
+                    "Docker daemon failed to become ready (exit {exit}): {}",
+                    docker
+                        .get("stderr")
+                        .and_then(|stderr| stderr.as_str())
+                        .unwrap_or("")
+                );
+            }
         }
 
         // Bucket mounts via mountpoint-s3, with AWS creds taken from the resident

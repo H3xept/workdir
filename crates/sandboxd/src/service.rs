@@ -410,8 +410,18 @@ async fn gather_node_snapshots(
     req: &PlacementRequest,
 ) -> ApiResult<Vec<NodeSnapshot>> {
     let nodes = state.store.list_nodes().map_err(ApiError::Internal)?;
+    let image_availability = if req.is_custom_image {
+        vec![false; nodes.len()]
+    } else {
+        futures::future::join_all(nodes.iter().map(|node| {
+            let client = state.node_for(&node.id);
+            let image_key = req.image_key.clone();
+            async move { client.image_available(&image_key).await }
+        }))
+        .await
+    };
     let mut out = vec![];
-    for node in nodes {
+    for (node, image_cached) in nodes.into_iter().zip(image_availability) {
         let active = state
             .store
             .active_sandboxes_on_node(&node.id)
@@ -436,7 +446,7 @@ async fn gather_node_snapshots(
             active_count,
             org_active_count,
             hot_pool_available,
-            image_cached: !req.is_custom_image, // curated always cached locally
+            image_cached,
             snapshot_available: if node.id == state.local_node_id {
                 state
                     .local
